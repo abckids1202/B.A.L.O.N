@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/logisense.db
+models/*.joblib
+models/*.pkl
+*.log
+.pytest_cache/
