@@ -41,3 +41,16 @@ def test_reports_models_alerts(client):
     assert client.get("/api/reports/executive-summary").json()["title"]
     assert isinstance(client.get("/api/models").json(), list)
     assert isinstance(client.get("/api/alerts").json(), list)
+
+
+def test_provider_snapshot_training_endpoints(client):
+    providers = client.get("/api/providers/status").json()
+    assert providers
+    assert any(p["domain"] == "Traffic" for p in providers)
+    snapshot = client.get("/api/snapshots/SHP-1028/current").json()
+    assert snapshot["shipment_id"] == "SHP-1028"
+    assert snapshot["traffic"]["provider"] == "DemoTrafficProvider"
+    sources = client.get("/api/data-sources").json()
+    assert any(s["domain"] == "Traffic" for s in sources)
+    training = client.get("/api/training-data/status").json()
+    assert training["delay"]["rows"] >= 1

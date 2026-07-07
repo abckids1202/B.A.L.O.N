@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from database import repositories as repo
-from modules.delivery_risk.features import build_features, factor_text, fallback_delay, fallback_sla_probability, risk_level
+from modules.delivery_risk.features import build_features, factor_text, risk_level
 from modules.hub_risk.analyzer import analyze_hub
 from modules.fleet.analyzer import analyze_fleet
 from modules.maintenance.rules import maintenance_score
@@ -13,6 +13,9 @@ from modules.routing.optimizer import optimize_routes
 from modules.carbon.calculator import estimate_route_carbon
 from modules.decision_engine.engine import sla_alert, hub_alert, route_alert
 from modules.loading.analyzer import validate_image, demo_detections
+from modules.delivery_risk.runtime_models import predict_delay as runtime_delay, predict_sla as runtime_sla
+from modules.providers.demo import provider_status as demo_provider_status
+from modules.providers.snapshot import OperationalSnapshotBuilder
 
 
 def now_iso() -> str:
@@ -43,29 +46,48 @@ def list_hubs() -> list[dict]:
     return repo.rows("SELECT * FROM hubs ORDER BY hub_id")
 
 
+def operational_snapshot(shipment_id: str) -> dict:
+    return OperationalSnapshotBuilder().build(shipment_id).to_dict()
+
+
 def snapshot(shipment_id: str) -> dict:
-    shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (shipment_id,))
-    if not shipment:
-        raise ValueError(f"Shipment {shipment_id} not found.")
-    hub = repo.row("SELECT * FROM hubs WHERE hub_id=?", (shipment["origin_hub"],))
-    traffic = repo.row("SELECT * FROM traffic_snapshots WHERE shipment_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (shipment_id,))
-    weather = repo.row("SELECT * FROM weather_snapshots WHERE shipment_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (shipment_id,))
-    gps = repo.row("SELECT * FROM gps_events WHERE shipment_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (shipment_id,))
-    hub_event = repo.row("SELECT * FROM hub_events WHERE shipment_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (shipment_id,))
-    return {"shipment": shipment, "hub": hub, "traffic": traffic, "weather": weather, "gps": gps, "hub_event": hub_event}
+    snap = operational_snapshot(shipment_id)
+    return {
+        "shipment": snap["shipment"],
+        "hub": snap["hub"],
+        "traffic": snap["traffic"],
+        "weather": snap["weather"],
+        "gps": snap["gps"],
+        "hub_event": snap["hub_event"],
+    }
 
 
 def predict_risk(shipment_id: str) -> dict:
     snap = snapshot(shipment_id)
     features = build_features(snap)
-    delay = fallback_delay(features)
-    probability = fallback_sla_probability(features, delay)
+    delay_result = runtime_delay(features)
+    delay = delay_result["value"]
+    sla_result = runtime_sla(features, delay)
+    probability = sla_result["value"]
     level = risk_level(probability)
     factors = factor_text(features, delay)
-    repo.execute("INSERT INTO delay_predictions(shipment_id,predicted_delay_minutes,model_source,model_version,factors_json) VALUES(?,?,?,?,?)", (shipment_id, delay, "Rule/ML Fallback", "fallback-v1", repo.jdump(factors)))
-    repo.execute("INSERT INTO sla_predictions(shipment_id,probability,risk_level,model_source,model_version,factors_json) VALUES(?,?,?,?,?,?)", (shipment_id, probability, level, "Rule/ML Fallback", "fallback-v1", repo.jdump(factors)))
+    model_source = f"{delay_result['source']} + {sla_result['source']}"
+    model_version = f"delay:{delay_result['version']}|sla:{sla_result['version']}"
+    repo.execute("INSERT INTO delay_predictions(shipment_id,predicted_delay_minutes,model_source,model_version,factors_json) VALUES(?,?,?,?,?)", (shipment_id, delay, delay_result["source"], delay_result["version"], repo.jdump(factors)))
+    repo.execute("INSERT INTO sla_predictions(shipment_id,probability,risk_level,model_source,model_version,factors_json) VALUES(?,?,?,?,?,?)", (shipment_id, probability, level, sla_result["source"], sla_result["version"], repo.jdump(factors)))
     _save_alert(sla_alert(shipment_id, probability, level, factors))
-    return {"shipment_id": shipment_id, "features": features, "predicted_delay_minutes": delay, "sla_probability": probability, "risk_level": level, "model_source": "Rule/ML Fallback", "model_version": "fallback-v1", "main_factors": factors}
+    return {
+        "shipment_id": shipment_id,
+        "snapshot": operational_snapshot(shipment_id),
+        "features": features,
+        "predicted_delay_minutes": delay,
+        "sla_probability": probability,
+        "risk_level": level,
+        "model_source": model_source,
+        "model_version": model_version,
+        "fallback_used": delay_result["fallback"] or sla_result["fallback"],
+        "main_factors": factors,
+    }
 
 
 def predict_batch() -> list[dict]:
@@ -119,6 +141,10 @@ def optimize(payload: dict) -> dict:
     latest_risk = repo.row("SELECT probability FROM sla_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (payload["shipment_id"],))
     sla_base = latest_risk["probability"] if latest_risk else predict_risk(payload["shipment_id"])["sla_probability"]
     result = optimize_routes(shipment, vehicle, _route_stops(payload["shipment_id"]), snap["traffic"]["traffic_index"], snap["weather"]["severity_index"], sla_base, payload.get("preset", "balanced_ai"), payload.get("weights"))
+    result["matrix_source"] = "Haversine demo matrix"
+    result["traffic_source"] = snap["traffic"].get("provider", "DemoTrafficProvider")
+    result["weather_source"] = snap["weather"].get("provider", "DemoWeatherProvider")
+    result["policy"] = payload.get("preset", "balanced_ai")
     repo.execute("DELETE FROM route_candidates WHERE shipment_id=?", (payload["shipment_id"],))
     for cand in result["candidates"]:
         cid = f"{payload['shipment_id']}-{cand['candidate_name'].upper().replace(' ', '-')}"
@@ -268,4 +294,28 @@ def executive_summary() -> dict:
         "generated_at": now_iso(),
         "synthetic_disclosure": "Synthetic demo environment. Estimates are prototype calculations.",
         "summary": summary,
+    }
+
+
+def provider_status() -> list[dict]:
+    return demo_provider_status()
+
+
+def data_sources() -> list[dict]:
+    return [
+        {"domain": "Traffic", "category": "Runtime", "current_provider": "DemoTrafficProvider", "future_provider": "Google Routes or TomTom", "status": "SYNTHETIC DEMO"},
+        {"domain": "Weather", "category": "Runtime", "current_provider": "DemoWeatherProvider", "future_provider": "BMKG or OpenWeather", "status": "SYNTHETIC DEMO"},
+        {"domain": "GPS", "category": "Runtime", "current_provider": "DemoGPSProvider", "future_provider": "Driver app / IoT tracker", "status": "SYNTHETIC DEMO"},
+        {"domain": "Shipment/ERP", "category": "Master + Operational", "current_provider": "DemoShipmentProvider", "future_provider": "ERP connector", "status": "SYNTHETIC DEMO"},
+        {"domain": "Hub", "category": "Runtime", "current_provider": "DemoHubProvider", "future_provider": "WMS / hub scan logs", "status": "SYNTHETIC DEMO"},
+        {"domain": "B.A.L.O.N predictions", "category": "Derived", "current_provider": "Model registry + rule fallback", "future_provider": "Validated model registry", "status": "DERIVED"},
+    ]
+
+
+def training_data_status() -> dict:
+    return {
+        "delay": {"rows": 420, "target": "delay_minutes", "split_strategy": "prototype random split; group-aware split documented as next hardening", "status": "synthetic prototype target"},
+        "sla": {"rows": 420, "target": "sla_breached", "split_strategy": "prototype stratified split; group-aware split documented as next hardening", "status": "synthetic prototype target"},
+        "carbon": {"rows": 420, "target": "co2_kg", "split_strategy": "prototype random split", "status": "synthetic formula-derived target"},
+        "yolo": {"images": 0, "target": "package/loading classes", "status": "demo mode; team-collected dataset required"},
     }

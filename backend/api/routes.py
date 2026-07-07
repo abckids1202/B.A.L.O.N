@@ -154,3 +154,21 @@ def models():
 @router.get("/reports/executive-summary")
 def executive_summary():
     return core.executive_summary()
+@router.get("/providers/status")
+def providers_status():
+    return core.provider_status()
+
+
+@router.get("/snapshots/{shipment_id}/current")
+def current_snapshot(shipment_id: str):
+    return handle(core.operational_snapshot, shipment_id)
+
+
+@router.get("/data-sources")
+def data_sources():
+    return core.data_sources()
+
+
+@router.get("/training-data/status")
+def training_data_status():
+    return core.training_data_status()

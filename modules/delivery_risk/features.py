@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
@@ -24,7 +24,7 @@ def build_features(snapshot: dict[str, Any]) -> dict[str, float]:
     historical = float(shipment["historical_travel_time_min"])
     dwell_excess = max(float(hub["average_dwell_time_min"]) - float(snapshot["hub"]["normal_dwell_time_min"]), 0)
     deadline = datetime.fromisoformat(shipment["sla_deadline"])
-    now = datetime.fromisoformat(traffic["captured_at"])
+    now = datetime.fromisoformat(traffic.get("captured_at") or traffic.get("observed_at"))
     eta_buffer = max((deadline - now).total_seconds() / 60.0 - planned, -180)
     return {
         "historical_travel_time_min": historical,
@@ -75,3 +75,4 @@ def factor_text(features: dict[str, float], predicted_delay: float) -> list[str]
         f"SLA buffer is {features['sla_buffer_minutes']:.0f} minutes versus predicted delay {predicted_delay:.0f} minutes.",
     ]
     return factors
+

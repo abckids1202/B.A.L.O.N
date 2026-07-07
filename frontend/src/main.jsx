@@ -99,6 +99,7 @@ function Status({ loading, error, children }) {
 
 function CommandCenter() {
   const summary = useAsync(api.analytics, []);
+  const providers = useAsync(api.providers, []);
   return (
     <>
       <Header title="Command Center" description="Monitor delivery risk, hub conditions, carbon impact, and live alerts." />
@@ -112,6 +113,17 @@ function CommandCenter() {
               <Card label="CO2 today" value={`${summary.data.daily_carbon_estimate_kg} kg`} tone="green" />
               <Card label="Fleet utilization" value={`${summary.data.fleet_utilization.fleet_utilization_score}%`} />
             </div>
+            <Panel title="Provider Freshness" icon={Server}>
+              <div className="provider-grid">
+                {providers.data?.map((provider) => (
+                  <article className="provider-card" key={provider.domain}>
+                    <b>{provider.domain}</b>
+                    <span>{provider.provider_name}</span>
+                    <small>{provider.health} · {provider.source_type}</small>
+                  </article>
+                ))}
+              </div>
+            </Panel>
             <div className="two-col">
               <Panel title="SLA Risk Distribution" icon={BarChart3}>
                 <div className="bar-list">
@@ -146,6 +158,7 @@ function DeliveryRisk({ shipments }) {
   const [shipmentId, setShipmentId] = useState("SHP-1028");
   const [risk, setRisk] = useState(null);
   const [history, setHistory] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
   const [busy, setBusy] = useState(false);
   async function run() {
     setBusy(true);
@@ -153,6 +166,7 @@ function DeliveryRisk({ shipments }) {
       const result = await api.risk(shipmentId);
       setRisk(result);
       setHistory(await api.riskHistory(shipmentId));
+      setSnapshot(await api.snapshot(shipmentId));
     } finally {
       setBusy(false);
     }
@@ -177,6 +191,7 @@ function DeliveryRisk({ shipments }) {
         </div>
       )}
       {risk && <Panel title="Main Factors" icon={AlertTriangle}>{risk.main_factors.map((f) => <p key={f}>{f}</p>)}</Panel>}
+      {snapshot && <Panel title="Operational Snapshot" icon={Server}><div className="snapshot-grid"><Card label="Traffic" value={snapshot.traffic.traffic_index} detail={snapshot.traffic.provider} /><Card label="Weather" value={snapshot.weather.condition} detail={`${snapshot.weather.rainfall_mm} mm rain`} /><Card label="Hub dwell" value={`${snapshot.hub_event.average_dwell_time_min} min`} detail={snapshot.hub_event.provider} /><Card label="Vehicle speed" value={`${snapshot.gps.speed_kmh} km/h`} detail={snapshot.gps.provider} /></div></Panel>}
       {history && <Panel title="Prediction History" icon={ClipboardList}><JsonBlock value={history} /></Panel>}
     </>
   );
@@ -262,13 +277,13 @@ function NetworkResilience({ hubs, vehicles }) {
         </div>
       </Panel>
       {hub && <div className="metrics-grid"><Card label="Congestion score" value={hub.congestion_score} /><Card label="Risk level" value={hub.risk_level} /><Card label="Queue growth" value={hub.queue_growth} /><Card label="Likely bottleneck" value={hub.likely_bottleneck} /></div>}
-      {fleet && <Panel title="Fleet Utilization" icon={Truck}><JsonBlock value={fleet} /></Panel>}
+      {fleet && <Panel title="Fleet Utilization" icon={Truck}><div className="metrics-grid"><Card label="Utilization score" value={`${fleet.fleet_utilization_score}%`} /><Card label="Active ratio" value={`${Math.round(fleet.active_vehicle_ratio * 100)}%`} /><Card label="Idle vehicles" value={fleet.idle_vehicle_count} /><Card label="High-use vehicles" value={fleet.high_use_vehicles.length} /></div></Panel>}
       <Panel title="Maintenance Check-Up" icon={Truck}>
         <div className="control-row">
           <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>{vehicles.map((v) => <option key={v.vehicle_id}>{v.vehicle_id}</option>)}</select>
           <Button onClick={checkVehicle} secondary>Analyze Vehicle</Button>
         </div>
-        {maintenance && <JsonBlock value={maintenance} />}
+        {maintenance && <div className="metrics-grid"><Card label="Health score" value={maintenance.health_score} /><Card label="Risk" value={maintenance.risk_level} /><Card label="Check-up window" value={`${maintenance.recommended_checkup_days} days`} /><Card label="Source" value={maintenance.source} /></div>}
       </Panel>
     </>
   );
@@ -291,7 +306,7 @@ function LiveSimulation() {
           <Button onClick={() => action(api.simulationNext)} busy={busy}>Next Event</Button>
         </div>
       </Panel>
-      {state && <Panel title="Simulation State" icon={Cloud}><JsonBlock value={state} /></Panel>}
+      {state && <Panel title="Simulation State" icon={Cloud}><div className="metrics-grid"><Card label="Step" value={state.state?.current_step ?? 0} /><Card label="Status" value={state.state?.status ?? 'Paused'} /><Card label="Active shipment" value={state.state?.active_shipment_id ?? 'SHP-1028'} /><Card label="Alerts" value={state.alerts?.length ?? 0} /></div>{state.processed_event && <p className="muted">Processed {state.processed_event.event_type} from {state.processed_event.entity_id}</p>}</Panel>}
     </>
   );
 }
@@ -301,18 +316,20 @@ function Analytics() {
   return (
     <>
       <Header title="Analytics & Impact" description="Review computed route, fuel, carbon, SLA, and fleet impact assumptions." />
-      <Status {...summary}>{summary.data && <JsonBlock value={summary.data} />}</Status>
+      <Status {...summary}>{summary.data && <><div className="metrics-grid"><Card label="Distance reduction" value={`${summary.data.route_impact.distance_reduction_km ?? 0} km`} /><Card label="Fuel reduction" value={`${summary.data.route_impact.fuel_reduction_liter ?? 0} L`} /><Card label="CO2 reduction" value={`${summary.data.route_impact.co2_reduction_kg ?? 0} kg`} /><Card label="SLA risk change" value={summary.data.route_impact.sla_risk_change ?? 0} /></div><Panel title="Assumptions" icon={ClipboardList}><p>{summary.data.assumptions}</p><p>{summary.data.route_impact.baseline}</p></Panel></>}</Status>
     </>
   );
 }
 
 function DataModels() {
   const models = useAsync(api.models, []);
+  const providers = useAsync(api.providers, []);
+  const training = useAsync(api.trainingData, []);
   return (
     <>
       <Header title="Data & Models" description="Inspect model registry metadata, synthetic dataset labels, metrics, and fallback states." />
       <Status {...models}>
-        {models.data && <div className="table-wrap"><table><thead><tr><th>Name</th><th>Version</th><th>Type</th><th>Availability</th><th>Metrics</th></tr></thead><tbody>{models.data.map((m) => <tr key={m.name}><td>{m.name}</td><td>{m.version}</td><td>{m.model_type}</td><td>{m.availability}</td><td><code>{JSON.stringify(m.metrics)}</code></td></tr>)}</tbody></table></div>}
+        {providers.data && <Panel title="Data Providers" icon={Network}><div className="provider-grid">{providers.data.map((p) => <article className="provider-card" key={p.domain}><b>{p.domain}</b><span>{p.provider_name}</span><small>{p.health} · {p.latest_update || 'seeded master data'}</small></article>)}</div></Panel>}{training.data && <Panel title="Training Data Status" icon={Brain}><JsonBlock value={training.data} /></Panel>}{models.data && <div className="table-wrap"><table><thead><tr><th>Name</th><th>Version</th><th>Type</th><th>Availability</th><th>Metrics</th></tr></thead><tbody>{models.data.map((m) => <tr key={m.name}><td>{m.name}</td><td>{m.version}</td><td>{m.model_type}</td><td>{m.availability}</td><td><code>{JSON.stringify(m.metrics)}</code></td></tr>)}</tbody></table></div>}
       </Status>
     </>
   );
@@ -325,7 +342,7 @@ function Reports() {
     <>
       <Header title="Reports" description="Generate an executive summary and export the current synthetic demo state." />
       <Status {...report}>
-        {report.data && <><a className="button" href={download} download="balon-executive-summary.json">Export JSON</a><JsonBlock value={report.data} /></>}
+        {report.data && <><a className="button" href={download} download="balon-executive-summary.json">Export JSON</a><div className="report-view"><h2>{report.data.title}</h2><p>{report.data.synthetic_disclosure}</p><h3>Network Status</h3><p>Active shipments: {report.data.summary.active_shipments}. Critical hubs: {report.data.summary.critical_hub_count}.</p><h3>Critical Findings</h3><p>Active alerts: {report.data.summary.alerts.length}.</p><h3>Carbon / Sustainability</h3><p>Estimated daily route carbon: {report.data.summary.daily_carbon_estimate_kg} kg CO2.</p><h3>Limitations / Data Provenance</h3><p>{report.data.summary.assumptions}</p></div></>}
       </Status>
     </>
   );

@@ -1,0 +1,17 @@
+factors:
+  - factor_id: gasoline_demo_2026
+    fuel_type: gasoline
+    factor_value: 2.31
+    unit: kg_co2_per_liter
+    source_name: Prototype configurable factor
+    source_version_or_year: 2026-demo
+    method_scope: tank_to_wheel_estimate
+    notes: Not certified carbon accounting.
+  - factor_id: diesel_demo_2026
+    fuel_type: diesel
+    factor_value: 2.68
+    unit: kg_co2_per_liter
+    source_name: Prototype configurable factor
+    source_version_or_year: 2026-demo
+    method_scope: tank_to_wheel_estimate
+    notes: Not certified carbon accounting.

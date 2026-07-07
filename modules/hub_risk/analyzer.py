@@ -41,6 +41,8 @@ def analyze_hub(event: dict, hub: dict) -> dict:
         "Outbound dispatch": max(f["queue_growth"], 0) / 10,
     }
     bottleneck = max(stages, key=stages.get)
+    if score < 40 or stages[bottleneck] < 1.25:
+        bottleneck = "No significant bottleneck"
     return {
         "hub_id": hub["hub_id"],
         "congestion_score": score,

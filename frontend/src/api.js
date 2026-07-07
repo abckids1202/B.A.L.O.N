@@ -35,5 +35,9 @@ export const api = {
   analytics: () => request("/api/analytics/summary"),
   models: () => request("/api/models"),
   report: () => request("/api/reports/executive-summary"),
-  alerts: () => request("/api/alerts")
+  alerts: () => request("/api/alerts"),
+  providers: () => request("/api/providers/status"),
+  snapshot: (shipmentId) => request(`/api/snapshots/${shipmentId}/current`),
+  dataSources: () => request("/api/data-sources"),
+  trainingData: () => request("/api/training-data/status")
 };

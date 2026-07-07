@@ -121,3 +121,42 @@ npm run build
 7. Review Network Resilience, Analytics, Models, and Reports.
 
 All demo data is synthetic and all prototype metrics are labeled as synthetic-target metrics.
+
+## Implementability Upgrade
+
+New runtime architecture additions:
+
+- Provider interfaces: `modules/providers/`
+- Operational snapshot builder: `modules/providers/snapshot.py`
+- Provider health endpoint: `GET /api/providers/status`
+- Current shipment snapshot: `GET /api/snapshots/{shipment_id}/current`
+- Data source matrix endpoint: `GET /api/data-sources`
+- Training data status endpoint: `GET /api/training-data/status`
+- Runtime Delay/SLA prediction now uses trained model artifacts when available and explicit rule fallback otherwise.
+
+Backend CORS env var for deployed frontend access:
+
+```env
+LOGISENSE_CORS_ORIGINS=*
+```
+
+For stricter production-style deployment, set it to your exact frontend domain:
+
+```env
+LOGISENSE_CORS_ORIGINS=https://your-vercel-domain.vercel.app
+```
+
+Additional verification commands:
+
+```bash
+python scripts/prepare_delay_dataset.py
+python scripts/audit_delay_dataset.py
+python scripts/prepare_sla_dataset.py
+python scripts/audit_sla_dataset.py
+python scripts/prepare_carbon_dataset.py
+python scripts/verify_runtime_models.py
+python scripts/audit_data_sources.py
+python scripts/verify_demo_flow.py
+python -m pytest
+npm run build
+```
