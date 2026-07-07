@@ -1,6 +1,0 @@
-tests/
-.pytest_cache/
-models/
-data/logisense.db
-__pycache__/
-*.pyc

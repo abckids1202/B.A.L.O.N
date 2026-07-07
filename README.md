@@ -1,87 +1,123 @@
-# LogiSense AI
+# B.A.L.O.N Logistics Command Center
 
-Green & Resilient Logistics Command Center for the Routix project.
+React frontend plus FastAPI backend for the Routix/LogiSense logistics AI prototype.
 
-This is a competition-grade prototype that combines delivery risk prediction, SLA risk scoring, green multi-objective routing, carbon estimates, hub congestion intelligence, fleet utilization, maintenance recommendations, a deterministic decision engine, alerts, and a simulated near-real-time SHP-1028 demo flow.
+## Deployment Shape
 
-## Architecture
+- Render: FastAPI backend
+- Vercel: React frontend
 
-Streamlit frontend -> FastAPI backend -> service layer -> domain modules -> repository helpers -> SQLite plus local data folders.
+The frontend calls the backend through `VITE_API_BASE`.
 
-The frontend never opens SQLite, loads models, or runs optimization directly.
-
-## Install
+## Local Backend
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-## Initialize Database
-
-```bash
-python scripts/initialize_database.py
-```
-
-## Generate Demo Data
-
-```bash
 python scripts/generate_demo_data.py
-```
-
-## Train/Register Models
-
-```bash
 python scripts/train_delay_model.py
 python scripts/train_sla_model.py
 python scripts/train_carbon_model.py
 python scripts/train_maintenance_model.py
 python scripts/train_yolo.py
+python -m uvicorn backend.main:app --reload
 ```
 
-## Start Backend
+Backend docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## Local Frontend
 
 ```bash
-uvicorn backend.main:app --reload
+npm install
+npm run dev
 ```
 
-Open Swagger at http://127.0.0.1:8000/docs.
+Frontend:
 
-## Start Frontend
+```text
+http://127.0.0.1:5173
+```
+
+## Render Backend
+
+Build command:
 
 ```bash
-streamlit run frontend/app.py
+pip install -r requirements.txt
 ```
 
-## Run Tests
+Start command:
+
+```bash
+python scripts/generate_demo_data.py && python scripts/train_delay_model.py && python scripts/train_sla_model.py && python scripts/train_carbon_model.py && python scripts/train_maintenance_model.py && python scripts/train_yolo.py && uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+```
+
+Environment variables:
+
+```env
+LOGISENSE_TIMEZONE=Asia/Jakarta
+LOGISENSE_RANDOM_SEED=42
+LOGISENSE_DB_PATH=data/logisense.db
+```
+
+## Vercel Frontend
+
+Framework preset:
+
+```text
+Vite
+```
+
+Root directory:
+
+```text
+./
+```
+
+Install command:
+
+```bash
+npm install
+```
+
+Build command:
+
+```bash
+npm run build
+```
+
+Output directory:
+
+```text
+frontend/dist
+```
+
+Environment variable:
+
+```env
+VITE_API_BASE=https://your-render-backend.onrender.com
+```
+
+## Tests
 
 ```bash
 python -m pytest
+npm run build
 ```
 
-## Demo Workflow
+## Demo Flow
 
-1. Open Command Center and confirm the synthetic environment badge.
-2. Open Delivery Risk AI and select `SHP-1028`.
-3. Run a loading analysis. Without YOLO weights, Demo Detection Mode is clearly disclosed.
-4. Run risk prediction and inspect predicted delay, SLA probability, risk level, and factors.
-5. Open Green Route Optimizer, select `SHP-1028`, and run Balanced AI optimization.
-6. Open Live Simulation, reset, and advance events: traffic, weather, hub, and GPS.
-7. Watch delivery risk, hub risk, route recommendation, and alerts update.
-8. Open Analytics & Impact and Reports for calculated impact and exportable JSON.
+1. Deploy/start the backend.
+2. Deploy/start the React frontend.
+3. Open Command Center.
+4. Run `SHP-1028` on Delivery Risk.
+5. Optimize routes.
+6. Advance Live Simulation events.
+7. Review Network Resilience, Analytics, Models, and Reports.
 
-## Honesty and Limitations
-
-All seeded data is synthetic. Model metrics are generated against prototype synthetic target logic and are not field-validated logistics performance. Route distances use simplified Haversine-derived estimates, and carbon output is an estimate, not certified accounting.
-
-## Customization
-
-- Colors and page styling: `frontend/components/ui.py`
-- Risk thresholds and route weights: `config/settings.py`
-- Carbon factors: `config/settings.py`
-- Synthetic data generation: `scripts/generate_demo_data.py`
-- Training formulas: `scripts/model_training_common.py`
-- Loading rules: `modules/loading/analyzer.py`
-- Decision rules: `modules/decision_engine/engine.py`
-- Route optimizer: `modules/routing/optimizer.py`
+All demo data is synthetic and all prototype metrics are labeled as synthetic-target metrics.

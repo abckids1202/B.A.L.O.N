@@ -1,7 +1,5 @@
 fastapi
 uvicorn
-streamlit
-requests
 pydantic
 pydantic-settings
 python-multipart
@@ -10,11 +8,6 @@ numpy
 scikit-learn
 joblib
 ortools
-folium
-streamlit-folium
-plotly
 Pillow
-opencv-python-headless
-ultralytics
 pytest
 httpx
