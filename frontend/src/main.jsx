@@ -280,23 +280,28 @@ function Heatmap({ title, rows, columns, values }) {
   );
 }
 
-function JourneyRail({ shipment, risk, snapshot }) {
-  const stage = shipmentStage(shipment);
-  const stages = ["Origin", "Line haul", "Main hub", "Inter-hub", "Local hub", "Last mile", "Buyer"];
-  const activeIndex = Math.max(0, stages.findIndex((s) => stage.toLowerCase().includes(s.split(" ")[0].toLowerCase())));
+function JourneyRail({ shipment, risk, snapshot, view }) {
+  const viewStages = view?.journey_progress?.stages;
+  const fallbackStage = shipmentStage(shipment);
+  const stages = viewStages?.length ? viewStages : ["Origin", "Line haul", "Main hub", "Inter-hub", "Local hub", "Last mile", "Buyer"].map((label, index) => ({
+    label,
+    state: index === 0 ? "current" : "future"
+  }));
   return (
     <div className="journey-rail">
-      {stages.map((item, index) => (
-        <div className={index <= activeIndex ? "rail-step active" : "rail-step"} key={item}>
+      {stages.map((item) => (
+        <div className={item.state === "complete" || item.state === "current" ? "rail-step active" : "rail-step"} key={item.key || item.label}>
           <i />
-          <span>{item}</span>
+          <span>{item.label}</span>
         </div>
       ))}
       <div className="journey-context">
         <b>{shipment.shipment_id}</b>
-        <span>{stage}</span>
-        {risk && <small>{risk.risk_level} SLA risk, {risk.predicted_delay_minutes} min delay</small>}
-        {snapshot && <small>{snapshot.weather?.condition || "weather"} / traffic {snapshot.traffic?.traffic_index ?? "n/a"}</small>}
+        <span>{view?.current_state?.stage_label || fallbackStage}</span>
+        {view?.latest_risk?.sla_probability != null && <small>{view.latest_risk.sla_level} SLA risk, {view.latest_risk.predicted_delay_minutes} min delay</small>}
+        {!view && risk && <small>{risk.risk_level} SLA risk, {risk.predicted_delay_minutes} min delay</small>}
+        {view?.latest_operational_snapshot && <small>{view.latest_operational_snapshot.weather_condition} / traffic {view.latest_operational_snapshot.traffic_index}</small>}
+        {!view && snapshot && <small>{snapshot.weather?.condition || "weather"} / traffic {snapshot.traffic?.traffic_index ?? "n/a"}</small>}
       </div>
     </div>
   );
@@ -329,8 +334,8 @@ function Timeline({ events }) {
   return (
     <div className="timeline">
       {events.map((event) => (
-        <article key={`${event.title}-${event.time}`} className={event.tone || ""}>
-          <time>{event.time}</time>
+        <article key={event.event_id || `${event.title}-${event.time || event.event_at}`} className={event.tone || riskTone(event.severity)}>
+          <time>{event.time || String(event.event_at || "").slice(11, 16) || "Now"}</time>
           <div>
             <b>{event.title}</b>
             <p>{event.description}</p>
@@ -419,88 +424,115 @@ function Overview({ shared }) {
 
 function PackageReports({ shared }) {
   const [shipmentId, setShipmentId] = useState(shared.shipments[0]?.shipment_id || "SHP-1028");
-  const [risk, setRisk] = useState(null);
-  const [history, setHistory] = useState(null);
-  const [snapshot, setSnapshot] = useState(null);
+  const [view, setView] = useState(null);
   const [simulationState, setSimulationState] = useState(null);
   const [busy, setBusy] = useState(false);
-  const shipment = shared.shipments.find((s) => s.shipment_id === shipmentId) || shared.shipments[0] || {};
+  const [error, setError] = useState("");
+  const shipment = view?.shipment || shared.shipments.find((s) => s.shipment_id === shipmentId) || shared.shipments[0] || {};
+  const current = view?.latest_operational_snapshot || {};
+  const risk = view?.latest_risk || {};
+
+  async function loadView(id = shipmentId) {
+    setBusy(true);
+    setError("");
+    try {
+      const journey = await api.packageJourneyView(id);
+      setView(journey);
+      return journey;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     api.simulationState().then(setSimulationState).catch(() => null);
-  }, []);
-
-  async function refreshPackage() {
-    setBusy(true);
-    try {
-      const [riskResult, historyResult, snapshotResult] = await Promise.all([
-        api.risk(shipmentId),
-        api.riskHistory(shipmentId),
-        api.snapshot(shipmentId)
-      ]);
-      setRisk(riskResult);
-      setHistory(historyResult);
-      setSnapshot(snapshotResult);
-    } finally {
-      setBusy(false);
-    }
-  }
+    loadView(shipmentId);
+  }, [shipmentId]);
 
   async function simulation(fn) {
     setBusy(true);
+    setError("");
     try {
       const next = await fn();
       setSimulationState(next);
-      await refreshPackage();
+      if (next.journey_view) {
+        setView(next.journey_view);
+      } else {
+        await loadView(shipmentId);
+      }
+    } catch (err) {
+      setError(err.message);
     } finally {
       setBusy(false);
     }
   }
 
-  const events = makeJourneyEvents(shipment, risk, snapshot, simulationState);
-  const factorData = (risk?.main_factors || []).map((factor, index) => ({ label: factor.slice(0, 26), value: Math.max(100 - index * 18, 28) }));
-  const historyData = (history || []).slice(-8).map((item, index) => item.sla_probability ? Math.round(item.sla_probability * 100) : index * 7 + 12);
+  const timeline = view?.timeline || makeJourneyEvents(shipment, null, null, simulationState);
+  const factorData = (risk.factors || []).map((factor, index) => ({ label: factor.slice(0, 26), value: Math.max(100 - index * 18, 28) }));
+  const slaHistory = Array.isArray(view?.risk_history?.sla) ? view.risk_history.sla : [];
+  const historyData = slaHistory.slice(-8).reverse().map((item) => Math.round((item.sla_probability ?? 0) * 100));
+  const carbonData = Object.entries(view?.carbon_summary?.stage_shares || { line_haul: 0.44, hub: 0.16, inter_hub: 0.25, last_mile: 0.15 }).map(([label, value]) => ({
+    label: label.replaceAll("_", " "),
+    value: Math.round(value * 100)
+  }));
+  const hubVisit = view?.current_hub_visit || {};
 
   return (
     <>
-      <Header title="Package Reports" description="Follow a package from origin to buyer with timeline, risk, hub dwell, route decisions, and carbon context." />
+      <Header title="Package Reports" description="Follow a package from origin to buyer with one coherent journey view, risk state, event timeline, hub dwell, route decisions, and carbon context." />
       <Panel title="Package Selector and Demo Scenario" icon={PackageSearch}>
         <div className="control-row">
           <select value={shipmentId} onChange={(event) => setShipmentId(event.target.value)}>
             {shared.shipments.map((shipment) => <option key={shipment.shipment_id}>{shipment.shipment_id}</option>)}
           </select>
-          <Button onClick={refreshPackage} busy={busy}>Refresh Package Intelligence</Button>
+          <Button onClick={() => loadView()} busy={busy}>Refresh Package View</Button>
           <Button onClick={() => simulation(api.simulationReset)} busy={busy} secondary><RefreshCcw size={16} /> Reset Demo</Button>
           <Button onClick={() => simulation(api.simulationNext)} busy={busy}><Play size={16} /> Next Event</Button>
         </div>
+        {busy && <p className="muted">Processing shipment event and rebuilding package intelligence...</p>}
+        {error && <div className="error">Demo event processing failed: {error}</div>}
       </Panel>
-      <JourneyRail shipment={shipment} risk={risk} snapshot={snapshot} />
+      <JourneyRail shipment={shipment} view={view} />
       <div className="metrics-grid">
-        <Card label="Current stage" value={shipmentStage(shipment)} detail={shipment.current_status || "journey active"} />
-        <Card label="Delay prediction" value={risk ? `${risk.predicted_delay_minutes} min` : "Run check"} tone={riskTone(risk?.risk_level)} />
-        <Card label="SLA breach risk" value={risk ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} tone={riskTone(risk?.risk_level)} />
-        <Card label="Traffic index" value={snapshot?.traffic?.traffic_index ?? "n/a"} detail={snapshot?.traffic?.provider} />
-        <Card label="Hub dwell" value={snapshot?.hub_event ? `${snapshot.hub_event.average_dwell_time_min} min` : "n/a"} detail={snapshot?.hub_event?.provider} />
+        <Card label="Current stage" value={view?.current_state?.stage_label || shipmentStage(shipment)} detail={view?.current_state?.location_id || shipment.current_status || "journey active"} />
+        <Card label="Delay prediction" value={risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} tone={riskTone(risk.sla_level)} />
+        <Card label="SLA breach risk" value={risk.sla_probability != null ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} detail={risk.sla_level} tone={riskTone(risk.sla_level)} />
+        <Card label="Traffic index" value={current.traffic_index ?? "n/a"} detail="latest provider snapshot" />
+        <Card label="Hub dwell" value={current.hub_dwell_time_min != null ? `${current.hub_dwell_time_min} min` : "n/a"} detail={`${current.hub_dwell_excess_min ?? 0} min vs baseline`} />
       </div>
       <div className="two-col">
         <Panel title="Journey Timeline" icon={ClipboardList}>
-          <Timeline events={events} />
+          <Timeline events={timeline} />
         </Panel>
         <Panel title="Package Context" icon={Server}>
           <div className="gauge-grid tight">
-            <GaugeCard label="Traffic" value={snapshot?.traffic?.traffic_index ? snapshot.traffic.traffic_index * 100 : 0} unit="%" tone="orange" />
-            <GaugeCard label="Weather severity" value={snapshot?.weather?.severity_index ? snapshot.weather.severity_index * 100 : 0} unit="%" tone="blue" />
-            <GaugeCard label="SLA risk" value={risk ? risk.sla_probability * 100 : 0} unit="%" tone={riskTone(risk?.risk_level)} />
-            <GaugeCard label="Delay" value={risk?.predicted_delay_minutes || 0} max={120} unit="m" tone="red" />
+            <GaugeCard label="Traffic" value={current.traffic_index ? current.traffic_index * 100 : 0} unit="%" tone="orange" />
+            <GaugeCard label="Weather severity" value={current.weather_severity ? current.weather_severity * 100 : 0} unit="%" tone="blue" />
+            <GaugeCard label="SLA risk" value={risk.sla_probability ? risk.sla_probability * 100 : 0} unit="%" tone={riskTone(risk.sla_level)} />
+            <GaugeCard label="Delay" value={risk.predicted_delay_minutes || 0} max={120} unit="m" tone="red" />
           </div>
           {historyData.length > 1 && <Sparkline points={historyData} color="#dc2626" />}
         </Panel>
       </div>
       <div className="viz-grid">
         <HorizontalBars title="Risk Factor Strength" data={factorData.length ? factorData : [{ label: "No material factors yet", value: 5 }]} color="#dc2626" />
-        <DonutChart title="Journey Carbon Allocation" data={[{ label: "Line haul", value: 44 }, { label: "Hub energy", value: 16 }, { label: "Inter-hub", value: 25 }, { label: "Last mile", value: 15 }]} />
-        <BarChart title="Hub Processing Minutes" data={[{ label: "Unload", value: 14 }, { label: "Sort", value: 33 }, { label: "Stage", value: 13 }, { label: "Load", value: 16 }]} color="#0f9d8a" />
-        <Heatmap title="Journey Risk Heatmap" rows={["Origin", "Hub", "Route", "Last mile"]} columns={["Delay", "SLA", "Carbon"]} values={{ "Origin-Delay": 12, "Origin-SLA": 8, "Origin-Carbon": 22, "Hub-Delay": 68, "Hub-SLA": 58, "Hub-Carbon": 16, "Route-Delay": 45, "Route-SLA": 52, "Route-Carbon": 72, "Last mile-Delay": 31, "Last mile-SLA": 35, "Last mile-Carbon": 44 }} />
+        <DonutChart title="Journey Carbon Allocation" data={carbonData} />
+        <BarChart title="Hub Processing Minutes" data={[
+          { label: "Unload", value: hubVisit.unloading_time_min || 0 },
+          { label: "Sort", value: hubVisit.sorting_time_min || 0 },
+          { label: "Dwell", value: hubVisit.dwell_time_min || 0 },
+          { label: "Load", value: hubVisit.loading_time_min || 0 }
+        ]} color="#0f9d8a" />
+        <HorizontalBars title="Route Decisions" data={(view?.route_decisions || []).slice(0, 5).map((route) => ({ label: route.candidate_name, value: route.metrics?.objective_score || route.metrics?.co2_kg || 0 }))} color="#2563eb" />
+        <Heatmap title="Journey Risk Heatmap" rows={["Origin", "Hub", "Route", "Last mile"]} columns={["Delay", "SLA", "Carbon"]} values={{ "Origin-Delay": 12, "Origin-SLA": 8, "Origin-Carbon": 22, "Hub-Delay": Math.round(current.hub_dwell_excess_min || 0), "Hub-SLA": Math.round((risk.sla_probability || 0) * 100), "Hub-Carbon": 16, "Route-Delay": Math.round((current.traffic_index || 0) * 100), "Route-SLA": Math.round((risk.sla_probability || 0) * 100), "Route-Carbon": 72, "Last mile-Delay": 31, "Last mile-SLA": 35, "Last mile-Carbon": 44 }} />
+        <div className="chart-card narrative">
+          <h3>Decision Activity</h3>
+          {view?.latest_route_recommendation ? <p>{view.latest_route_recommendation.explanation}</p> : <p>No route intervention has been recorded yet.</p>}
+          {(view?.alerts || []).slice(0, 3).map((alert) => <p key={alert.alert_id}><b>{alert.severity}</b>: {alert.title}</p>)}
+        </div>
       </div>
     </>
   );

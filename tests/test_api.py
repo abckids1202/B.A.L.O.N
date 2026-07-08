@@ -54,3 +54,17 @@ def test_provider_snapshot_training_endpoints(client):
     assert any(s["domain"] == "Traffic" for s in sources)
     training = client.get("/api/training-data/status").json()
     assert training["delay"]["rows"] >= 1
+
+
+def test_package_journey_view_and_demo_pipeline(client):
+    reset = client.post("/api/simulation/reset").json()
+    assert reset["journey_view"]["current_state"]["stage"] == "ORIGIN_PROCESSING"
+    first = client.post("/api/simulation/next").json()
+    assert first["processed_event"]["event_id"] == "EVT-001"
+    assert first["journey_view"]["current_state"]["stage"] == "LINE_HAUL"
+    second = client.post("/api/simulation/next").json()
+    assert second["journey_view"]["current_state"]["stage"] == "MAIN_HUB_PROCESSING"
+    view = client.get("/api/packages/SHP-1028/journey-view").json()
+    assert view["journey_progress"]["current_stage"] == view["current_state"]["stage"]
+    assert view["timeline"]
+    assert isinstance(view["risk_history"]["sla"], list)

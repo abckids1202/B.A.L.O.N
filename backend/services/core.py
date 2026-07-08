@@ -206,9 +206,20 @@ def acknowledge_alert(alert_id: str) -> dict:
 
 
 def simulation_reset() -> dict:
-    repo.execute("UPDATE simulation_events SET processed=0")
-    repo.execute("INSERT OR REPLACE INTO simulation_state(id,current_step,status,current_timestamp,active_shipment_id) VALUES(1,0,'Paused',?,'SHP-1028')", (now_iso(),))
-    return simulation_state()
+    """Reset the canonical SHP-1028 demo to a deterministic baseline."""
+    from scripts.generate_demo_data import main as seed_demo
+
+    seed_demo()
+    risk = predict_risk("SHP-1028")
+    route = optimize({"shipment_id": "SHP-1028", "preset": "balanced_ai"})
+    view = package_journey_view("SHP-1028")
+    return {
+        "processed_event": None,
+        "risk": risk,
+        "route_recommendation": route["recommended"],
+        "journey_view": view,
+        **simulation_state(),
+    }
 
 
 def simulation_state() -> dict:
@@ -222,23 +233,259 @@ def simulation_state() -> dict:
 def simulation_next() -> dict:
     event = repo.row("SELECT * FROM simulation_events WHERE processed=0 ORDER BY step LIMIT 1")
     if not event:
-        return {"complete": True, **simulation_state()}
+        return {"complete": True, "journey_view": package_journey_view("SHP-1028"), **simulation_state()}
     payload = repo.jload(event["payload_json"], {})
     ts = event["timestamp"]
-    if event["event_type"] == "TRAFFIC_UPDATE":
-        repo.execute("INSERT INTO traffic_snapshots(route_id,shipment_id,traffic_index,average_speed_kmh,travel_time_multiplier,captured_at) VALUES(?,?,?,?,?,?)", ("ROUTE-JKT-BKS-01", "SHP-1028", payload["traffic_index"], payload["average_speed_kmh"], payload["travel_time_multiplier"], ts))
-    elif event["event_type"] == "WEATHER_UPDATE":
-        repo.execute("INSERT INTO weather_snapshots(shipment_id,condition,rainfall_mm,temperature_c,severity_index,captured_at) VALUES(?,?,?,?,?,?)", ("SHP-1028", payload["condition"], payload["rainfall_mm"], payload["temperature_c"], payload["severity_index"], ts))
-    elif event["event_type"] == "HUB_UPDATE":
-        repo.execute("INSERT INTO hub_events(hub_id,shipment_id,arrival_rate_per_hour,departure_rate_per_hour,queue_size,average_dwell_time_min,processing_rate_per_hour,sorting_time_min,loading_time_min,unloading_time_min,workforce_capacity_index,current_delayed_shipments,current_total_shipments,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ("HUB-BKS", "SHP-1028", payload["arrival_rate_per_hour"], payload["departure_rate_per_hour"], payload["queue_size"], payload["average_dwell_time_min"], payload["processing_rate_per_hour"], payload["sorting_time_min"], payload["loading_time_min"], payload["unloading_time_min"], payload["workforce_capacity_index"], payload["current_delayed_shipments"], payload["current_total_shipments"], ts))
-        analyze_hub_service("HUB-BKS")
-    elif event["event_type"] == "GPS_UPDATE":
-        repo.execute("INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)", ("SHP-1028", "VAN-021", payload["lat"], payload["lon"], payload["speed_kmh"], payload["route_deviation_count"], ts))
+    event_type = event["event_type"]
+    if event_type in {"ORIGIN_DISPATCHED", "HUB_DEPARTED", "LAST_MILE_STARTED"}:
+        vehicle_id = payload.get("vehicle_id", "VAN-021")
+        repo.execute(
+            "INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)",
+            ("SHP-1028", vehicle_id, payload.get("lat", -6.25), payload.get("lon", 106.99), payload.get("speed_kmh", 28), payload.get("route_deviation_count", 0), ts),
+        )
+    if event_type in {"TRAFFIC_UPDATE", "HUB_DEPARTED"}:
+        repo.execute(
+            "INSERT INTO traffic_snapshots(route_id,shipment_id,traffic_index,average_speed_kmh,travel_time_multiplier,captured_at) VALUES(?,?,?,?,?,?)",
+            ("ROUTE-JKT-BKS-01", "SHP-1028", payload.get("traffic_index", 0.68), payload.get("average_speed_kmh", 24), payload.get("travel_time_multiplier", 1.45), ts),
+        )
+    if event_type == "WEATHER_UPDATE":
+        repo.execute(
+            "INSERT INTO weather_snapshots(shipment_id,condition,rainfall_mm,temperature_c,severity_index,captured_at) VALUES(?,?,?,?,?,?)",
+            ("SHP-1028", payload["condition"], payload["rainfall_mm"], payload["temperature_c"], payload["severity_index"], ts),
+        )
+    if event_type in {"HUB_ARRIVED", "HUB_UPDATE", "LOCAL_HUB_ARRIVED"}:
+        hub_id = payload.get("hub_id", "HUB-BKS")
+        repo.execute(
+            "INSERT INTO hub_events(hub_id,shipment_id,arrival_rate_per_hour,departure_rate_per_hour,queue_size,average_dwell_time_min,processing_rate_per_hour,sorting_time_min,loading_time_min,unloading_time_min,workforce_capacity_index,current_delayed_shipments,current_total_shipments,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                hub_id,
+                "SHP-1028",
+                payload.get("arrival_rate_per_hour", 22),
+                payload.get("departure_rate_per_hour", 20),
+                payload.get("queue_size", 11),
+                payload.get("average_dwell_time_min", 0),
+                payload.get("processing_rate_per_hour", 30),
+                payload.get("sorting_time_min", 18),
+                payload.get("loading_time_min", 16),
+                payload.get("unloading_time_min", 12),
+                payload.get("workforce_capacity_index", 0.92),
+                payload.get("current_delayed_shipments", 4),
+                payload.get("current_total_shipments", 80),
+                ts,
+            ),
+        )
+        analyze_hub_service(hub_id)
+    if event_type == "GPS_UPDATE":
+        repo.execute(
+            "INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)",
+            ("SHP-1028", payload.get("vehicle_id", "VAN-021"), payload["lat"], payload["lon"], payload["speed_kmh"], payload["route_deviation_count"], ts),
+        )
+    if event_type == "DELIVERED":
+        repo.execute("UPDATE shipments SET status='Delivered' WHERE shipment_id='SHP-1028'")
     repo.execute("UPDATE simulation_events SET processed=1 WHERE event_id=?", (event["event_id"],))
     repo.execute("UPDATE simulation_state SET current_step=?, current_timestamp=? WHERE id=1", (event["step"], ts))
     risk = predict_risk("SHP-1028")
     route = optimize({"shipment_id": "SHP-1028", "preset": "balanced_ai"})
-    return {"processed_event": {**event, "payload": payload}, "risk": risk, "route_recommendation": route["recommended"], **simulation_state()}
+    view = package_journey_view("SHP-1028")
+    return {
+        "processed_event": {**event, "payload": payload},
+        "risk": risk,
+        "route_recommendation": route["recommended"],
+        "journey_view": view,
+        **simulation_state(),
+    }
+
+
+JOURNEY_STAGES = [
+    ("ORIGIN_PROCESSING", "Origin", "FC-JKT"),
+    ("LINE_HAUL", "Line Haul", "FC-JKT to HUB-JKT"),
+    ("MAIN_HUB_PROCESSING", "Main Hub", "HUB-JKT"),
+    ("INTER_HUB", "Inter-Hub", "HUB-JKT to HUB-BKS"),
+    ("LOCAL_HUB_PROCESSING", "Local Hub", "HUB-BKS"),
+    ("LAST_MILE", "Last Mile", "Bekasi Timur"),
+    ("DELIVERED", "Buyer", "Bekasi Timur"),
+]
+
+
+def _stage_for_step(step: int) -> tuple[int, str, str, str]:
+    if step <= 0:
+        index = 0
+    elif step == 1:
+        index = 1
+    elif step in {2, 3}:
+        index = 2
+    elif step in {4, 5}:
+        index = 3
+    elif step == 6:
+        index = 4
+    elif step == 7:
+        index = 5
+    else:
+        index = 6
+    stage, label, location = JOURNEY_STAGES[index]
+    return index, stage, label, location
+
+
+def _prediction_row(row: dict | None, kind: str) -> dict | None:
+    if not row:
+        return None
+    factors = repo.jload(row.get("factors_json"), [])
+    if kind == "delay":
+        return {
+            "id": row["id"],
+            "predicted_delay_minutes": row["predicted_delay_minutes"],
+            "model_source": row["model_source"],
+            "model_version": row["model_version"],
+            "factors": factors,
+            "created_at": row["created_at"],
+        }
+    return {
+        "id": row["id"],
+        "sla_probability": row["probability"],
+        "sla_level": row["risk_level"],
+        "model_source": row["model_source"],
+        "model_version": row["model_version"],
+        "factors": factors,
+        "created_at": row["created_at"],
+    }
+
+
+def _timeline_from_events(shipment_id: str) -> list[dict]:
+    events = repo.rows("SELECT * FROM simulation_events ORDER BY step")
+    timeline = [
+        {
+            "event_id": "INITIAL",
+            "event_type": "SHIPMENT_CREATED",
+            "event_at": events[0]["timestamp"] if events else now_iso(),
+            "title": f"{shipment_id} journey initialized",
+            "description": "Package journey opened at FC-JKT for same-day delivery to Bekasi Timur.",
+            "severity": "Info",
+            "processed": True,
+        }
+    ]
+    titles = {
+        "ORIGIN_DISPATCHED": "Origin dispatch",
+        "HUB_ARRIVED": "Main hub arrival",
+        "HUB_UPDATE": "Sorting delay update",
+        "HUB_DEPARTED": "Inter-hub departure",
+        "WEATHER_UPDATE": "Weather deterioration",
+        "LOCAL_HUB_ARRIVED": "Local hub arrival",
+        "LAST_MILE_STARTED": "Last-mile started",
+        "DELIVERED": "Delivered to buyer",
+        "TRAFFIC_UPDATE": "Traffic update",
+        "GPS_UPDATE": "GPS update",
+    }
+    for event in events:
+        if not event["processed"]:
+            continue
+        payload = repo.jload(event["payload_json"], {})
+        timeline.append(
+            {
+                "event_id": event["event_id"],
+                "event_type": event["event_type"],
+                "event_at": event["timestamp"],
+                "title": titles.get(event["event_type"], event["event_type"].replace("_", " ").title()),
+                "description": payload.get("description") or f"{event['entity_id']} updated the active package journey.",
+                "severity": payload.get("severity", "Info"),
+                "processed": True,
+                "payload": payload,
+            }
+        )
+    return timeline
+
+
+def package_journey_view(shipment_id: str) -> dict:
+    shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (shipment_id,))
+    if not shipment:
+        raise ValueError(f"Unknown shipment {shipment_id}")
+    state = repo.row("SELECT * FROM simulation_state WHERE id=1") or {"current_step": 0, "current_timestamp": now_iso(), "active_shipment_id": shipment_id}
+    step = int(state.get("current_step") or 0)
+    stage_index, stage, stage_label, location = _stage_for_step(step)
+    if shipment.get("status") == "Delivered":
+        stage_index, stage, stage_label, location = _stage_for_step(99)
+    snap = operational_snapshot(shipment_id)
+    latest_delay = _prediction_row(repo.row("SELECT * FROM delay_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (shipment_id,)), "delay")
+    latest_sla = _prediction_row(repo.row("SELECT * FROM sla_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (shipment_id,)), "sla")
+    risk_history_rows = risk_history(shipment_id)
+    route_rows = route_candidates(shipment_id)
+    latest_recommendation = repo.row("SELECT * FROM route_recommendations WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (shipment_id,))
+    recommendation = None
+    if latest_recommendation:
+        recommendation = {
+            "candidate": latest_recommendation["recommended_candidate"],
+            "explanation": latest_recommendation["explanation"],
+            "evidence": repo.jload(latest_recommendation["evidence_json"], {}),
+            "created_at": latest_recommendation["created_at"],
+        }
+    shipment_alerts = [a for a in alerts() if a["entity_id"] in {shipment_id, shipment.get("origin_hub")}]
+    carbon_total = round(sum(c["co2_kg"] for c in repo.rows("SELECT co2_kg FROM carbon_estimates WHERE shipment_id=?", (shipment_id,))), 3)
+    if not carbon_total and route_rows:
+        carbon_total = round(sum(r["metrics"].get("co2_kg", 0) for r in route_rows), 3)
+    return {
+        "shipment_id": shipment_id,
+        "journey_id": f"JRN-{shipment_id}",
+        "view_version": step,
+        "snapshot_at": state.get("current_timestamp") or now_iso(),
+        "environment": {"mode": "demo", "contains_simulated_data": True},
+        "current_state": {
+            "stage": stage,
+            "stage_label": stage_label,
+            "status": "DELIVERED" if stage == "DELIVERED" else "IN_PROGRESS",
+            "location_type": "BUYER" if stage == "DELIVERED" else ("HUB" if "HUB" in stage else "TRANSPORT"),
+            "location_id": location,
+            "active_leg_id": None if "HUB" in stage else f"LEG-{shipment_id}-{stage_index:02d}",
+            "active_hub_visit_id": f"HVIS-{shipment_id}-{stage_index:02d}" if "HUB" in stage else None,
+        },
+        "shipment": shipment,
+        "latest_operational_snapshot": {
+            "traffic_index": snap["traffic"]["traffic_index"],
+            "weather_severity": snap["weather"]["severity_index"],
+            "weather_condition": snap["weather"]["condition"],
+            "rainfall_mm": snap["weather"]["rainfall_mm"],
+            "gps_speed_kmh": snap["gps"]["speed_kmh"],
+            "expected_speed_kmh": snap["traffic"]["average_speed_kmh"],
+            "route_deviation": snap["gps"]["route_deviation_count"] > 0,
+            "hub_id": snap["hub"]["hub_id"],
+            "hub_dwell_time_min": snap["hub_event"]["average_dwell_time_min"],
+            "hub_dwell_excess_min": round(snap["hub_event"]["average_dwell_time_min"] - snap["hub"]["normal_dwell_time_min"], 1),
+        },
+        "latest_risk": {
+            "predicted_delay_minutes": latest_delay["predicted_delay_minutes"] if latest_delay else None,
+            "sla_probability": latest_sla["sla_probability"] if latest_sla else None,
+            "sla_level": latest_sla["sla_level"] if latest_sla else "Unknown",
+            "delay_source": latest_delay["model_source"] if latest_delay else None,
+            "sla_source": latest_sla["model_source"] if latest_sla else None,
+            "factors": latest_sla["factors"] if latest_sla else [],
+        },
+        "journey_progress": {
+            "stages": [{"key": key, "label": label, "state": "complete" if i < stage_index else ("current" if i == stage_index else "future")} for i, (key, label, _loc) in enumerate(JOURNEY_STAGES)],
+            "completed_stages": [key for i, (key, _label, _loc) in enumerate(JOURNEY_STAGES) if i < stage_index],
+            "current_stage": stage,
+            "future_stages": [key for i, (key, _label, _loc) in enumerate(JOURNEY_STAGES) if i > stage_index],
+        },
+        "timeline": _timeline_from_events(shipment_id),
+        "current_hub_visit": {
+            "hub_id": snap["hub"]["hub_id"],
+            "dwell_time_min": snap["hub_event"]["average_dwell_time_min"],
+            "baseline_dwell_time_min": snap["hub"]["normal_dwell_time_min"],
+            "dwell_excess_min": round(snap["hub_event"]["average_dwell_time_min"] - snap["hub"]["normal_dwell_time_min"], 1),
+            "sorting_time_min": snap["hub_event"]["sorting_time_min"],
+            "loading_time_min": snap["hub_event"]["loading_time_min"],
+            "unloading_time_min": snap["hub_event"]["unloading_time_min"],
+        },
+        "risk_history": {
+            "delay": [_prediction_row(row, "delay") for row in risk_history_rows["delay"]],
+            "sla": [_prediction_row(row, "sla") for row in risk_history_rows["sla"]],
+        },
+        "carbon_summary": {
+            "total_co2_kg": carbon_total,
+            "stage_shares": {"line_haul": 0.44, "hub": 0.16, "inter_hub": 0.25, "last_mile": 0.15},
+        },
+        "route_decisions": route_rows,
+        "latest_route_recommendation": recommendation,
+        "alerts": shipment_alerts,
+        "decision_activity": [recommendation] if recommendation else [],
+    }
 
 
 def simulation_play() -> dict:

@@ -24,6 +24,7 @@ export const api = {
   hubs: () => request("/api/hubs"),
   risk: (shipmentId) => request(`/api/risk/predict/${shipmentId}`, { method: "POST" }),
   riskHistory: (shipmentId) => request(`/api/risk/history/${shipmentId}`),
+  packageJourneyView: (shipmentId) => request(`/api/packages/${shipmentId}/journey-view`),
   optimize: (payload) => request("/api/routes/optimize", { method: "POST", body: JSON.stringify(payload) }),
   hubRisk: () => request("/api/hubs/risk"),
   analyzeHub: (hubId) => request(`/api/hubs/analyze/${hubId}`, { method: "POST" }),

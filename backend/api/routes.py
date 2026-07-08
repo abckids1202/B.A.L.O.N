@@ -25,6 +25,10 @@ def vehicles():
 def shipments():
     return core.list_shipments()
 
+@router.get("/packages/{shipment_id}/journey-view")
+def package_journey_view(shipment_id: str):
+    return handle(core.package_journey_view, shipment_id)
+
 
 @router.get("/hubs")
 def hubs():
