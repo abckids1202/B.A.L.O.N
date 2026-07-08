@@ -31,6 +31,7 @@ def main() -> None:
             "sla=", risk["sla_probability"],
             "traffic=", current["traffic_index"],
             "weather=", current["weather_severity"],
+            "interventions=", len(view.get("active_interventions", [])),
             "events=", len(view["timeline"]),
         )
     final_view = core.package_journey_view("SHP-1028")
@@ -38,7 +39,8 @@ def main() -> None:
     assert final_view["current_state"]["stage"] == "DELIVERED"
     assert final_view["current_state"]["status"] == "DELIVERED"
     assert len(final_view["timeline"]) >= len(seen)
-    print("verify_shp1028_journey: OK", {"events": len(seen), "final_stage": final_view["current_state"]["stage"]})
+    assert final_view.get("active_interventions"), "Expected at least one operational intervention"
+    print("verify_shp1028_journey: OK", {"events": len(seen), "final_stage": final_view["current_state"]["stage"], "interventions": len(final_view.get("active_interventions", []))})
 
 
 if __name__ == "__main__":

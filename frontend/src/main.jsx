@@ -346,6 +346,89 @@ function Timeline({ events }) {
   );
 }
 
+
+function TwinCard({ title, rows, tone = "blue" }) {
+  return (
+    <article className={`twin-card ${tone}`}>
+      <h3>{title}</h3>
+      {rows.map((row) => (
+        <div key={row.label} className="twin-row">
+          <span>{row.label}</span>
+          <b>{row.value ?? "N/A"}</b>
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function DigitalTwinPanel({ twin }) {
+  if (!twin) {
+    return <EmptyState>Build the package view to load the shipment digital twin.</EmptyState>;
+  }
+  const actual = twin.actual || {};
+  const current = twin.current || {};
+  const forecast = twin.forecast || {};
+  const projected = twin.projected_final || {};
+  return (
+    <div className="twin-grid">
+      <TwinCard title="Actual" tone="green" rows={[
+        { label: "Elapsed", value: `${actual.elapsed_time_min ?? 0} min` },
+        { label: "Completed distance", value: `${actual.distance_completed_km ?? 0} km` },
+        { label: "Accumulated delay", value: `${actual.accumulated_delay_min ?? 0} min` },
+        { label: "Carbon so far", value: `${actual.carbon_allocated_so_far_kg ?? 0} kg CO2e` }
+      ]} />
+      <TwinCard title="Current" rows={[
+        { label: "Stage", value: current.stage_label },
+        { label: "Location", value: current.location_id },
+        { label: "Vehicle", value: current.vehicle_id || "N/A" },
+        { label: "Hub dwell", value: current.hub ? `${current.hub.dwell_time_min} min` : "N/A" }
+      ]} />
+      <TwinCard title="Forecast" tone="orange" rows={[
+        { label: "Predicted delay", value: `${forecast.predicted_delay_min ?? 0} min` },
+        { label: "SLA breach risk", value: forecast.sla_breach_probability != null ? `${Math.round(forecast.sla_breach_probability * 100)}%` : "N/A" },
+        { label: "Next milestone", value: forecast.next_milestone || "N/A" },
+        { label: "Expected hub dwell", value: forecast.expected_next_hub_dwell_min != null ? `${forecast.expected_next_hub_dwell_min} min` : "N/A" }
+      ]} />
+      <TwinCard title="Projected Final" tone="red" rows={[
+        { label: "Delivery ETA", value: projected?.delivery_eta || (actual.final_outcome?.delivered ? "Delivered" : "N/A") },
+        { label: "SLA met probability", value: projected?.sla_met_probability != null ? `${Math.round(projected.sla_met_probability * 100)}%` : actual.final_outcome?.sla_status },
+        { label: "Total journey time", value: projected?.projected_total_journey_time_min != null ? `${projected.projected_total_journey_time_min} min` : "Final" },
+        { label: "Projected carbon", value: projected?.projected_total_carbon_kg != null ? `${projected.projected_total_carbon_kg} kg CO2e` : `${actual.carbon_allocated_so_far_kg ?? 0} kg CO2e` }
+      ]} />
+    </div>
+  );
+}
+
+function InterventionQueue({ interventions, onAccept, onReject, busy }) {
+  if (!interventions?.length) {
+    return <EmptyState>No material operational intervention is active for this package.</EmptyState>;
+  }
+  return (
+    <div className="intervention-list">
+      {interventions.slice(0, 5).map((item) => (
+        <article className="intervention-card" key={item.intervention_id}>
+          <div>
+            <b>{item.intervention_type.replaceAll("_", " ")}</b>
+            <span>{item.status} / {item.severity}</span>
+          </div>
+          <p>{item.reason}</p>
+          {item.impact && (
+            <small>
+              SLA {item.impact.actual_reforecast_sla_change_pp ?? item.impact.expected_sla_change_pp} pp /
+              Delay {item.impact.actual_reforecast_delay_change_min ?? item.impact.expected_delay_change_min} min /
+              CO2 {item.impact.actual_reforecast_co2_change_kg ?? item.impact.expected_co2_change_kg} kg
+            </small>
+          )}
+          <div className="control-row">
+            <Button secondary busy={busy} onClick={() => onAccept(item.intervention_id)}>Accept</Button>
+            <Button secondary busy={busy} onClick={() => onReject(item.intervention_id)}>Reject</Button>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function makeJourneyEvents(shipment, risk, snapshot, simulationState) {
   const id = shipment?.shipment_id || "SHP-1028";
   const delay = risk?.predicted_delay_minutes ?? 14;
@@ -425,6 +508,7 @@ function Overview({ shared }) {
 function PackageReports({ shared }) {
   const [shipmentId, setShipmentId] = useState(shared.shipments[0]?.shipment_id || "SHP-1028");
   const [view, setView] = useState(null);
+  const [twin, setTwin] = useState(null);
   const [simulationState, setSimulationState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -436,8 +520,9 @@ function PackageReports({ shared }) {
     setBusy(true);
     setError("");
     try {
-      const journey = await api.packageJourneyView(id);
+      const [journey, digitalTwin] = await Promise.all([api.packageJourneyView(id), api.digitalTwin(id)]);
       setView(journey);
+      setTwin(digitalTwin);
       return journey;
     } catch (err) {
       setError(err.message);
@@ -460,6 +545,7 @@ function PackageReports({ shared }) {
       setSimulationState(next);
       if (next.journey_view) {
         setView(next.journey_view);
+        setTwin(next.digital_twin || await api.digitalTwin(shipmentId));
       } else {
         await loadView(shipmentId);
       }
@@ -480,6 +566,26 @@ function PackageReports({ shared }) {
   }));
   const hubVisit = view?.current_hub_visit || {};
 
+  async function acceptIntervention(interventionId) {
+    setBusy(true);
+    try {
+      await api.acceptIntervention(interventionId);
+      await loadView(shipmentId);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rejectIntervention(interventionId) {
+    setBusy(true);
+    try {
+      await api.rejectIntervention(interventionId);
+      await loadView(shipmentId);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <Header title="Package Reports" description="Follow a package from origin to buyer with one coherent journey view, risk state, event timeline, hub dwell, route decisions, and carbon context." />
@@ -496,6 +602,12 @@ function PackageReports({ shared }) {
         {error && <div className="error">Demo event processing failed: {error}</div>}
       </Panel>
       <JourneyRail shipment={shipment} view={view} />
+      <Panel title="Shipment Journey Digital Twin" icon={Activity}>
+        <DigitalTwinPanel twin={twin} />
+      </Panel>
+      <Panel title="Operational Intervention Queue" icon={AlertTriangle}>
+        <InterventionQueue interventions={view?.active_interventions || twin?.active_interventions || []} onAccept={acceptIntervention} onReject={rejectIntervention} busy={busy} />
+      </Panel>
       <div className="metrics-grid">
         <Card label="Current stage" value={view?.current_state?.stage_label || shipmentStage(shipment)} detail={view?.current_state?.location_id || shipment.current_status || "journey active"} />
         <Card label="Delay prediction" value={risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} tone={riskTone(risk.sla_level)} />

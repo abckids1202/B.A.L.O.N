@@ -67,6 +67,25 @@ CREATE TABLE IF NOT EXISTS route_recommendations (
   id INTEGER PRIMARY KEY AUTOINCREMENT, shipment_id TEXT, recommended_candidate TEXT, explanation TEXT,
   evidence_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS operational_interventions (
+  intervention_id TEXT PRIMARY KEY, shipment_id TEXT, journey_id TEXT, journey_leg_id TEXT,
+  hub_id TEXT, vehicle_id TEXT, intervention_type TEXT NOT NULL, trigger_type TEXT,
+  trigger_event_id TEXT, severity TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  expires_at TEXT, status TEXT NOT NULL, recommended_action TEXT NOT NULL,
+  recommended_entity_id TEXT, reason TEXT, primary_factor TEXT, evidence_json TEXT,
+  before_state_json TEXT, expected_after_state_json TEXT, actual_after_state_json TEXT,
+  decision_policy TEXT, accepted_at TEXT, executed_at TEXT, completed_at TEXT,
+  rejected_at TEXT, rejection_reason TEXT, impact_json TEXT, is_simulated INTEGER DEFAULT 1,
+  scenario_id TEXT
+);
+CREATE TABLE IF NOT EXISTS intervention_impacts (
+  impact_id TEXT PRIMARY KEY, intervention_id TEXT NOT NULL, shipment_id TEXT,
+  expected_delay_change_min REAL, actual_reforecast_delay_change_min REAL,
+  expected_sla_change_pp REAL, actual_reforecast_sla_change_pp REAL,
+  expected_co2_change_kg REAL, actual_reforecast_co2_change_kg REAL,
+  status TEXT NOT NULL, evidence_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(intervention_id) REFERENCES operational_interventions(intervention_id)
+);
 CREATE TABLE IF NOT EXISTS alerts (
   alert_id TEXT PRIMARY KEY, alert_type TEXT, entity_type TEXT, entity_id TEXT, severity TEXT,
   title TEXT, message TEXT, recommendation TEXT, evidence_json TEXT, status TEXT DEFAULT 'Active',
@@ -99,4 +118,6 @@ CREATE TABLE IF NOT EXISTS simulation_state (
 CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, severity);
 CREATE INDEX IF NOT EXISTS idx_sim_events_step ON simulation_events(step, processed);
+CREATE INDEX IF NOT EXISTS idx_interventions_status ON operational_interventions(status, severity, created_at);
+CREATE INDEX IF NOT EXISTS idx_interventions_shipment ON operational_interventions(shipment_id, intervention_type);
 '''

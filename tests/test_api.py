@@ -68,3 +68,21 @@ def test_package_journey_view_and_demo_pipeline(client):
     assert view["journey_progress"]["current_stage"] == view["current_state"]["stage"]
     assert view["timeline"]
     assert isinstance(view["risk_history"]["sla"], list)
+
+
+def test_digital_twin_temporal_sections_and_interventions(client):
+    client.post("/api/simulation/reset")
+    origin = client.get("/api/packages/SHP-1028/digital-twin").json()
+    assert set(["actual", "current", "forecast", "projected_final"]).issubset(origin)
+    assert origin["current"]["stage"] == "ORIGIN_PROCESSING"
+    assert origin["current"]["hub"] is None
+    for _ in range(7):
+        client.post("/api/simulation/next")
+    twin = client.get("/api/packages/SHP-1028/digital-twin").json()
+    assert twin["active_interventions"]
+    interventions = client.get("/api/interventions?shipment_id=SHP-1028").json()
+    assert interventions
+    first = interventions[0]
+    assert first["status"] in {"COMPLETED", "PENDING", "ACCEPTED"}
+    impact = client.get(f"/api/interventions/{first['intervention_id']}/impact").json()
+    assert impact["status"] in {"IMPROVED", "NO_MATERIAL_CHANGE", "PENDING_RESULT"}

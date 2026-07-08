@@ -545,3 +545,64 @@ code { white-space: normal; overflow-wrap: anywhere; }
   .rail-step::before { display: none; }
   .donut-layout { grid-template-columns: 1fr; justify-items: center; }
 }
+
+
+.twin-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.twin-card {
+  border: 1px solid #e2e8f0;
+  border-left: 4px solid #2563eb;
+  border-radius: 8px;
+  padding: 14px;
+  background: #ffffff;
+}
+.twin-card.green { border-left-color: #0f9d8a; }
+.twin-card.orange { border-left-color: #f59e0b; }
+.twin-card.red { border-left-color: #dc2626; }
+.twin-card h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+.twin-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid #f1f5f9;
+}
+.twin-row span { color: #64748b; }
+.twin-row b { text-align: right; }
+.intervention-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.intervention-card {
+  border: 1px solid #fed7aa;
+  border-left: 4px solid #f59e0b;
+  border-radius: 8px;
+  background: #fff7ed;
+  padding: 14px;
+}
+.intervention-card div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.intervention-card span, .intervention-card small {
+  color: #9a3412;
+  font-weight: 750;
+}
+.intervention-card p {
+  color: #7c2d12;
+  line-height: 1.45;
+}
+@media (max-width: 1180px) {
+  .twin-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 880px) {
+  .twin-grid { grid-template-columns: 1fr; }
+}

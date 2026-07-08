@@ -19,7 +19,7 @@ def iso(minutes: int = 0) -> str:
 
 def main() -> None:
     initialize_database()
-    for table in ["route_candidates","routes","traffic_snapshots","weather_snapshots","gps_events","hub_events","loading_inspections","delay_predictions","sla_predictions","carbon_estimates","route_recommendations","alerts","maintenance_history","breakdown_history","maintenance_predictions","simulation_events","simulation_state","shipments","vehicles","hubs","model_registry"]:
+    for table in ["intervention_impacts","operational_interventions","route_candidates","routes","traffic_snapshots","weather_snapshots","gps_events","hub_events","loading_inspections","delay_predictions","sla_predictions","carbon_estimates","route_recommendations","alerts","maintenance_history","breakdown_history","maintenance_predictions","simulation_events","simulation_state","shipments","vehicles","hubs","model_registry"]:
         repo.execute(f"DELETE FROM {table}")
     vehicles = [
         ("VAN-021","van",900,4200,"diesel",10.8,"Active",38450,34200,"2026-05-15"),

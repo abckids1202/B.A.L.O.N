@@ -29,6 +29,35 @@ def shipments():
 def package_journey_view(shipment_id: str):
     return handle(core.package_journey_view, shipment_id)
 
+@router.get("/packages/{shipment_id}/digital-twin")
+def package_digital_twin(shipment_id: str):
+    return handle(core.shipment_digital_twin, shipment_id)
+
+
+@router.get("/interventions")
+def interventions(status: str | None = None, shipment_id: str | None = None):
+    return core.list_interventions(status=status, shipment_id=shipment_id)
+
+
+@router.get("/interventions/{intervention_id}")
+def intervention_detail(intervention_id: str):
+    return handle(core.get_intervention, intervention_id)
+
+
+@router.post("/interventions/{intervention_id}/accept")
+def intervention_accept(intervention_id: str):
+    return handle(core.accept_intervention, intervention_id)
+
+
+@router.post("/interventions/{intervention_id}/reject")
+def intervention_reject(intervention_id: str, reason: str = "Rejected by operator"):
+    return handle(core.reject_intervention, intervention_id, reason)
+
+
+@router.get("/interventions/{intervention_id}/impact")
+def intervention_impact(intervention_id: str):
+    return handle(core.intervention_impact, intervention_id)
+
 
 @router.get("/hubs")
 def hubs():

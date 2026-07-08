@@ -18,6 +18,12 @@ from modules.providers.demo import provider_status as demo_provider_status
 from modules.providers.snapshot import OperationalSnapshotBuilder
 
 
+INTERVENTION_THRESHOLDS = {
+    "min_sla_improvement_pp": 5.0,
+    "min_delay_improvement_min": 5.0,
+    "min_co2_reduction_percent": 2.0,
+}
+
 def now_iso() -> str:
     return datetime.now(timezone(timedelta(hours=7))).replace(microsecond=0).isoformat()
 
@@ -235,6 +241,7 @@ def simulation_next() -> dict:
     if not event:
         return {"complete": True, "journey_view": package_journey_view("SHP-1028"), **simulation_state()}
     payload = repo.jload(event["payload_json"], {})
+    before_state = _latest_prediction_pair("SHP-1028")
     ts = event["timestamp"]
     event_type = event["event_type"]
     if event_type in {"ORIGIN_DISPATCHED", "HUB_DEPARTED", "LAST_MILE_STARTED"}:
@@ -286,12 +293,16 @@ def simulation_next() -> dict:
     repo.execute("UPDATE simulation_state SET current_step=?, current_timestamp=? WHERE id=1", (event["step"], ts))
     risk = predict_risk("SHP-1028")
     route = optimize({"shipment_id": "SHP-1028", "preset": "balanced_ai"})
+    intervention = maybe_create_route_intervention("SHP-1028", event, risk, route, before_state)
     view = package_journey_view("SHP-1028")
+    twin = shipment_digital_twin("SHP-1028")
     return {
         "processed_event": {**event, "payload": payload},
         "risk": risk,
         "route_recommendation": route["recommended"],
+        "intervention": intervention,
         "journey_view": view,
+        "digital_twin": twin,
         **simulation_state(),
     }
 
@@ -484,9 +495,279 @@ def package_journey_view(shipment_id: str) -> dict:
         "route_decisions": route_rows,
         "latest_route_recommendation": recommendation,
         "alerts": shipment_alerts,
-        "decision_activity": [recommendation] if recommendation else [],
+        "active_interventions": list_interventions(shipment_id=shipment_id),
+        "latest_decision": list_interventions(shipment_id=shipment_id)[0] if list_interventions(shipment_id=shipment_id) else None,
+        "decision_activity": list_interventions(shipment_id=shipment_id) or ([recommendation] if recommendation else []),
     }
 
+
+
+def _latest_prediction_pair(shipment_id: str) -> dict:
+    delay = _prediction_row(repo.row("SELECT * FROM delay_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (shipment_id,)), "delay")
+    sla = _prediction_row(repo.row("SELECT * FROM sla_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (shipment_id,)), "sla")
+    return {
+        "predicted_delay_minutes": delay["predicted_delay_minutes"] if delay else None,
+        "sla_probability": sla["sla_probability"] if sla else None,
+        "sla_level": sla["sla_level"] if sla else "Unknown",
+        "delay_source": delay["model_source"] if delay else None,
+        "sla_source": sla["model_source"] if sla else None,
+        "factors": sla["factors"] if sla else [],
+    }
+
+
+def _intervention_row(row: dict) -> dict:
+    item = dict(row)
+    for source, target, default in [
+        ("evidence_json", "evidence", {}),
+        ("before_state_json", "before_state", {}),
+        ("expected_after_state_json", "expected_after_state", {}),
+        ("actual_after_state_json", "actual_after_state", None),
+        ("impact_json", "impact", None),
+    ]:
+        item[target] = repo.jload(item.pop(source), default)
+    return item
+
+
+def list_interventions(status: str | None = None, shipment_id: str | None = None) -> list[dict]:
+    clauses = []
+    params = []
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if shipment_id:
+        clauses.append("shipment_id=?")
+        params.append(shipment_id)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = repo.rows(f"SELECT * FROM operational_interventions{where} ORDER BY created_at DESC", tuple(params))
+    return [_intervention_row(row) for row in rows]
+
+
+def get_intervention(intervention_id: str) -> dict:
+    row = repo.row("SELECT * FROM operational_interventions WHERE intervention_id=?", (intervention_id,))
+    if not row:
+        raise ValueError(f"Unknown intervention {intervention_id}")
+    return _intervention_row(row)
+
+
+def _route_materiality(shipment_id: str, route_result: dict, risk: dict, before_state: dict | None) -> dict:
+    candidates = route_result.get("candidates", [])
+    current = next((c for c in candidates if c["candidate_name"] == "Current"), None)
+    recommended = route_result.get("recommended") or next((c for c in candidates if c.get("selected")), None)
+    if not current or not recommended:
+        return {"material": False, "reason": "Route candidates did not include both current and recommended options."}
+    if recommended["candidate_name"] == current["candidate_name"]:
+        return {"material": False, "reason": "Current route remains the recommended option."}
+    current_metrics = current["metrics"]
+    recommended_metrics = recommended["metrics"]
+    time_saving = round(current_metrics["estimated_time_min"] - recommended_metrics["estimated_time_min"], 2)
+    sla_improvement_pp = round((current_metrics["sla_risk"] - recommended_metrics["sla_risk"]) * 100, 2)
+    co2_reduction_kg = round(current_metrics["co2_kg"] - recommended_metrics["co2_kg"], 3)
+    co2_reduction_pct = round((co2_reduction_kg / current_metrics["co2_kg"]) * 100, 2) if current_metrics["co2_kg"] else 0
+    material = (
+        sla_improvement_pp >= INTERVENTION_THRESHOLDS["min_sla_improvement_pp"]
+        or time_saving >= INTERVENTION_THRESHOLDS["min_delay_improvement_min"]
+        or co2_reduction_pct >= INTERVENTION_THRESHOLDS["min_co2_reduction_percent"]
+        or (risk.get("sla_probability") or 0) >= 0.7
+    )
+    return {
+        "material": material,
+        "reason": "Route candidate produced material improvement." if material else "No candidate met materiality thresholds.",
+        "current": current,
+        "recommended": recommended,
+        "time_saving_min": time_saving,
+        "sla_improvement_pp": sla_improvement_pp,
+        "co2_reduction_kg": co2_reduction_kg,
+        "co2_reduction_pct": co2_reduction_pct,
+        "before_probability": before_state.get("sla_probability") if before_state else None,
+        "current_probability": risk.get("sla_probability"),
+    }
+
+
+def _persist_impact(intervention_id: str, shipment_id: str, impact: dict) -> None:
+    repo.execute(
+        "INSERT OR REPLACE INTO intervention_impacts(impact_id,intervention_id,shipment_id,expected_delay_change_min,actual_reforecast_delay_change_min,expected_sla_change_pp,actual_reforecast_sla_change_pp,expected_co2_change_kg,actual_reforecast_co2_change_kg,status,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            f"IMP-{intervention_id}",
+            intervention_id,
+            shipment_id,
+            impact.get("expected_delay_change_min"),
+            impact.get("actual_reforecast_delay_change_min"),
+            impact.get("expected_sla_change_pp"),
+            impact.get("actual_reforecast_sla_change_pp"),
+            impact.get("expected_co2_change_kg"),
+            impact.get("actual_reforecast_co2_change_kg"),
+            impact.get("status", "PENDING_RESULT"),
+            repo.jdump(impact.get("evidence", {})),
+        ),
+    )
+
+
+def maybe_create_route_intervention(shipment_id: str, trigger_event: dict | None, risk: dict, route_result: dict, before_state: dict | None) -> dict | None:
+    event_type = trigger_event.get("event_type") if trigger_event else "MANUAL"
+    if event_type not in {"HUB_UPDATE", "HUB_DEPARTED", "WEATHER_UPDATE", "GPS_UPDATE"}:
+        return None
+    materiality = _route_materiality(shipment_id, route_result, risk, before_state)
+    if not materiality["material"]:
+        return None
+    event_id = trigger_event["event_id"] if trigger_event else "MANUAL"
+    intervention_id = f"INT-{shipment_id}-{event_id}-ROUTE"
+    recommended = materiality["recommended"]
+    current = materiality["current"]
+    expected_after = {
+        "route_candidate": recommended["candidate_name"],
+        "projected_time_min": recommended["metrics"]["estimated_time_min"],
+        "projected_sla_probability": recommended["metrics"]["sla_risk"],
+        "projected_co2_kg": recommended["metrics"]["co2_kg"],
+    }
+    before = {
+        "route_candidate": current["candidate_name"],
+        "projected_time_min": current["metrics"]["estimated_time_min"],
+        "projected_sla_probability": current["metrics"]["sla_risk"],
+        "projected_co2_kg": current["metrics"]["co2_kg"],
+        "previous_sla_probability": materiality.get("before_probability"),
+        "current_sla_probability": materiality.get("current_probability"),
+    }
+    impact = {
+        "expected_delay_change_min": -materiality["time_saving_min"],
+        "actual_reforecast_delay_change_min": -materiality["time_saving_min"],
+        "expected_sla_change_pp": -materiality["sla_improvement_pp"],
+        "actual_reforecast_sla_change_pp": -materiality["sla_improvement_pp"],
+        "expected_co2_change_kg": -materiality["co2_reduction_kg"],
+        "actual_reforecast_co2_change_kg": -materiality["co2_reduction_kg"],
+        "status": "IMPROVED" if materiality["time_saving_min"] > 0 or materiality["sla_improvement_pp"] > 0 else "NO_MATERIAL_CHANGE",
+        "evidence": materiality,
+    }
+    now = now_iso()
+    repo.execute(
+        "INSERT OR REPLACE INTO operational_interventions(intervention_id,shipment_id,journey_id,journey_leg_id,hub_id,vehicle_id,intervention_type,trigger_type,trigger_event_id,severity,status,recommended_action,recommended_entity_id,reason,primary_factor,evidence_json,before_state_json,expected_after_state_json,actual_after_state_json,decision_policy,accepted_at,executed_at,completed_at,impact_json,is_simulated,scenario_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            intervention_id,
+            shipment_id,
+            f"JRN-{shipment_id}",
+            None,
+            None,
+            None,
+            "ROUTE_REOPTIMIZATION",
+            "SLA_FORECAST_CHANGE",
+            event_id,
+            "High" if (risk.get("sla_probability") or 0) >= 0.7 else "Warning",
+            "COMPLETED",
+            f"Use {recommended['candidate_name']} route candidate.",
+            recommended.get("candidate_id") or recommended["candidate_name"],
+            f"SLA and route forecast changed materially. {route_result.get('explanation', '')}",
+            (risk.get("factors") or ["Route candidate improved the forecast."])[0],
+            repo.jdump(materiality),
+            repo.jdump(before),
+            repo.jdump(expected_after),
+            repo.jdump(expected_after),
+            "AUTOMATED_DEMO_POLICY_V1",
+            now,
+            now,
+            now,
+            repo.jdump(impact),
+            1,
+            "SHP1028_DELAY_ESCALATION",
+        ),
+    )
+    _persist_impact(intervention_id, shipment_id, impact)
+    return get_intervention(intervention_id)
+
+
+def accept_intervention(intervention_id: str) -> dict:
+    now = now_iso()
+    repo.execute("UPDATE operational_interventions SET status='COMPLETED', accepted_at=COALESCE(accepted_at,?), executed_at=COALESCE(executed_at,?), completed_at=COALESCE(completed_at,?) WHERE intervention_id=?", (now, now, now, intervention_id))
+    return get_intervention(intervention_id)
+
+
+def reject_intervention(intervention_id: str, reason: str = "Rejected by operator") -> dict:
+    repo.execute("UPDATE operational_interventions SET status='REJECTED', rejected_at=?, rejection_reason=? WHERE intervention_id=?", (now_iso(), reason, intervention_id))
+    return get_intervention(intervention_id)
+
+
+def intervention_impact(intervention_id: str) -> dict:
+    row = repo.row("SELECT * FROM intervention_impacts WHERE intervention_id=?", (intervention_id,))
+    if not row:
+        raise ValueError(f"No impact record for {intervention_id}")
+    item = dict(row)
+    item["evidence"] = repo.jload(item.pop("evidence_json"), {})
+    return item
+
+
+def _digital_twin_sections(view: dict) -> dict:
+    shipment = view["shipment"]
+    state = view["current_state"]
+    snap = view["latest_operational_snapshot"]
+    risk = view["latest_risk"]
+    stage = state["stage"]
+    elapsed = max(0, int(view["view_version"]) * 22)
+    completed_stage_count = len(view["journey_progress"]["completed_stages"])
+    distance_total = float(shipment.get("route_distance_km") or 0)
+    distance_completed = round(min(distance_total, distance_total * completed_stage_count / max(len(JOURNEY_STAGES) - 1, 1)), 2)
+    projected_delay = risk["predicted_delay_minutes"] or 0
+    projected_total_time = round(float(shipment.get("planned_travel_time_min") or 0) + projected_delay, 1)
+    current_is_hub = "HUB" in stage
+    delivered = stage == "DELIVERED"
+    projected_carbon = view["carbon_summary"]["total_co2_kg"]
+    actual_carbon = projected_carbon if delivered else round(projected_carbon * (completed_stage_count / max(len(JOURNEY_STAGES) - 1, 1)), 3)
+    return {
+        "shipment_id": view["shipment_id"],
+        "journey_id": view["journey_id"],
+        "twin_version": view["view_version"],
+        "as_of": view["snapshot_at"],
+        "actual": {
+            "journey_started_at": "2026-07-05T09:00:00+07:00",
+            "elapsed_time_min": elapsed,
+            "distance_completed_km": distance_completed,
+            "accumulated_delay_min": 0 if view["view_version"] <= 1 else round(projected_delay * min(completed_stage_count / 6, 1), 1),
+            "carbon_allocated_so_far_kg": actual_carbon,
+            "completed_legs": min(completed_stage_count, 3),
+            "completed_hub_visits": len([s for s in view["journey_progress"]["completed_stages"] if "HUB" in s]),
+            "final_outcome": {"delivered": delivered, "sla_status": "MET" if delivered and (risk["sla_probability"] or 0) < 0.9 else ("AT_RISK" if not delivered else "REVIEW")},
+        },
+        "current": {
+            "stage": stage,
+            "stage_label": state["stage_label"],
+            "location_type": state["location_type"],
+            "location_id": state["location_id"],
+            "origin": state["location_id"].split(" to ")[0] if " to " in state["location_id"] else None,
+            "destination": state["location_id"].split(" to ")[-1] if " to " in state["location_id"] else shipment.get("destination_zone"),
+            "vehicle_id": shipment.get("vehicle_id") if not current_is_hub and not delivered else None,
+            "route_id": "ROUTE-JKT-BKS-01" if not current_is_hub and not delivered else None,
+            "traffic": {"traffic_index": snap["traffic_index"], "expected_speed_kmh": snap["expected_speed_kmh"]} if not delivered else None,
+            "weather": {"condition": snap["weather_condition"], "severity_index": snap["weather_severity"], "rainfall_mm": snap["rainfall_mm"]} if not delivered else None,
+            "gps": {"speed_kmh": snap["gps_speed_kmh"], "route_deviation": snap["route_deviation"]} if not current_is_hub and not delivered else None,
+            "hub": {
+                "hub_id": snap["hub_id"],
+                "dwell_time_min": snap["hub_dwell_time_min"],
+                "dwell_excess_min": snap["hub_dwell_excess_min"],
+            } if current_is_hub else None,
+        },
+        "forecast": {
+            "predicted_delay_min": projected_delay,
+            "sla_breach_probability": risk["sla_probability"],
+            "sla_level": risk["sla_level"],
+            "next_milestone": view["journey_progress"]["future_stages"][0] if view["journey_progress"]["future_stages"] else None,
+            "expected_next_hub_dwell_min": None if current_is_hub or delivered else 35,
+            "main_factors": risk["factors"],
+        },
+        "projected_final": None if delivered else {
+            "delivery_eta": shipment.get("sla_deadline"),
+            "sla_met_probability": round(1 - (risk["sla_probability"] or 0), 3),
+            "projected_total_journey_time_min": projected_total_time,
+            "projected_total_delay_min": projected_delay,
+            "projected_total_carbon_kg": projected_carbon,
+        },
+        "active_interventions": list_interventions(shipment_id=view["shipment_id"]),
+        "latest_decision": list_interventions(shipment_id=view["shipment_id"])[0] if list_interventions(shipment_id=view["shipment_id"]) else None,
+        "timeline": view["timeline"],
+        "risk_history": view["risk_history"],
+        "journey_progress": view["journey_progress"],
+    }
+
+
+def shipment_digital_twin(shipment_id: str) -> dict:
+    view = package_journey_view(shipment_id)
+    return _digital_twin_sections(view)
 
 def simulation_play() -> dict:
     repo.execute("UPDATE simulation_state SET status='Playing' WHERE id=1")
