@@ -606,3 +606,139 @@ code { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 880px) {
   .twin-grid { grid-template-columns: 1fr; }
 }
+
+
+.nav-section { display: grid; gap: 6px; margin-bottom: 10px; }
+.nav-section > span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 8px 12px 2px;
+}
+.metrics-grid.seven { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.text-input {
+  min-height: 42px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 0 12px;
+}
+.control-row.stacked { display: grid; }
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.status-pill.green { background: #dcfce7; color: #166534; }
+.status-pill.orange { background: #ffedd5; color: #9a3412; }
+.status-pill.red { background: #fee2e2; color: #991b1b; }
+.entity-table tbody tr { cursor: pointer; }
+.entity-table tbody tr:hover, .entity-table tbody tr.selected { background: #eef5ff; }
+.entity-table td:nth-child(n+6), .entity-table th:nth-child(n+6) { text-align: right; }
+.ops-map {
+  background: #eef5ff;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  padding: 12px;
+}
+.ops-map svg { width: 100%; min-height: 320px; display: block; }
+.ops-map rect { fill: #f8fbff; stroke: #c7d9f5; }
+.corridor {
+  fill: none;
+  stroke: #93c5fd;
+  stroke-width: 8;
+  stroke-linecap: round;
+}
+.corridor.active { stroke: #2563eb; }
+.corridor.warning { stroke: #f59e0b; stroke-dasharray: 10 9; }
+.map-node circle { fill: #2563eb; stroke: white; stroke-width: 4; }
+.map-node.fc circle { fill: #0f9d8a; }
+.map-node text, .map-package text { fill: #0f172a; font-weight: 800; font-size: 12px; }
+.map-package circle { fill: #f59e0b; stroke: white; stroke-width: 4; }
+.map-package.selected circle { fill: #dc2626; }
+.map-cluster circle { fill: #fee2e2; stroke: #dc2626; stroke-width: 3; }
+.map-cluster text { fill: #991b1b; font-weight: 900; font-size: 14px; }
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 4px 0;
+  color: #475569;
+  font-size: 13px;
+}
+.map-legend span { display: inline-flex; gap: 6px; align-items: center; }
+.map-legend i { width: 10px; height: 10px; border-radius: 50%; background: #2563eb; }
+.map-legend i.orange { background: #f59e0b; }
+.map-legend i.red { background: #dc2626; }
+.overview-main { grid-template-columns: minmax(480px, 1.3fr) minmax(360px, .9fr); }
+.process-flow {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.process-flow span {
+  padding: 10px 8px;
+  border-radius: 8px;
+  background: #eef5ff;
+  color: #1d4ed8;
+  text-align: center;
+  font-weight: 800;
+  font-size: 12px;
+}
+.process-flow span.hot { background: #ffedd5; color: #9a3412; }
+.route-job {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.route-job div {
+  background: #eef5ff;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  padding: 12px;
+}
+.route-job span { color: #64748b; display: block; font-size: 12px; font-weight: 800; }
+.route-job b { display: block; margin-top: 5px; }
+.method-list p { margin: 0 0 10px; color: #475569; }
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.comparison-card {
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  padding: 14px;
+  background: #f8fbff;
+}
+.comparison-card span, .comparison-card small { color: #64748b; font-weight: 800; }
+.comparison-card b, .comparison-card strong { display: block; margin-top: 8px; }
+.comparison-card strong { color: #2563eb; font-size: 22px; }
+.assumption-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.assumption-grid article {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  background: white;
+}
+.assumption-grid b, .assumption-grid span { display: block; }
+.assumption-grid span { margin-top: 6px; color: #64748b; }
+@media (max-width: 1180px) {
+  .metrics-grid.seven, .comparison-grid, .route-job, .assumption-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 880px) {
+  .metrics-grid.seven, .comparison-grid, .route-job, .assumption-grid, .process-flow { grid-template-columns: 1fr; }
+}

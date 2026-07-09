@@ -21,13 +21,10 @@ import {
 import { api } from "./api";
 import "./styles.css";
 
-const nav = [
-  ["Overview", Activity],
-  ["Package Reports", PackageSearch],
-  ["Analytics", BarChart3],
-  ["Route Planning", Route],
-  ["Fleet", Truck],
-  ["Data & Models", Server]
+const navSections = [
+  { label: "Operations", items: [["Overview", Activity], ["Package Tracking", PackageSearch], ["Package Reports", ClipboardList], ["Hub Operations", Network], ["Route Planning", Route]] },
+  { label: "Resources", items: [["Fleet & Vehicles", Truck], ["Analytics", BarChart3]] },
+  { label: "System", items: [["Data, Models & Assumptions", Server]] }
 ];
 
 const palette = ["#2563eb", "#0f9d8a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#84cc16", "#f97316"];
@@ -429,6 +426,98 @@ function InterventionQueue({ interventions, onAccept, onReject, busy }) {
   );
 }
 
+
+function formatPercent(value, digits = 0) {
+  return value == null ? "N/A" : `${(safeNumber(value) * 100).toFixed(digits)}%`;
+}
+
+function formatPp(value, digits = 1) {
+  const n = safeNumber(value) * 100;
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)} pp`;
+}
+
+function StatusPill({ children, tone = "blue" }) {
+  return <span className={`status-pill ${tone}`}>{children}</span>;
+}
+
+function EntityTable({ columns, rows, selectedId, onSelect }) {
+  return (
+    <div className="table-wrap entity-table">
+      <table>
+        <thead><tr>{columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id || row.shipment_id || row.vehicle_id || row.hub_id} className={selectedId === (row.id || row.shipment_id || row.vehicle_id || row.hub_id) ? "selected" : ""} onClick={() => onSelect?.(row)}>
+              {columns.map((column) => <td key={column.key}>{column.render ? column.render(row) : row[column.key]}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function OperationsMap({ shipments = [], hubs = [], selectedId }) {
+  const coords = {
+    "HUB-JKT": [245, 118],
+    "HUB-BKS": [374, 142],
+    "HUB-TNG": [116, 154],
+    "FC-JKT": [190, 202],
+    "Bekasi Timur": [430, 108]
+  };
+  const atRisk = shipments.filter((s) => s.priority === "Critical" || s.priority === "Express").length;
+  return (
+    <div className="ops-map">
+      <svg viewBox="0 0 540 300" role="img" aria-label="Synthetic logistics network map">
+        <rect x="18" y="18" width="504" height="264" rx="16" />
+        <path d="M190 202 C224 150 256 122 245 118 C288 104 334 116 374 142" className="corridor active" />
+        <path d="M116 154 C160 126 204 108 245 118" className="corridor" />
+        <path d="M374 142 C402 126 420 116 430 108" className="corridor warning" />
+        {hubs.map((hub) => {
+          const [x, y] = coords[hub.hub_id] || [260, 150];
+          return <g key={hub.hub_id} className="map-node hub"><circle cx={x} cy={y} r="15" /><text x={x + 18} y={y + 5}>{hub.hub_id}</text></g>;
+        })}
+        <g className="map-node fc"><circle cx="190" cy="202" r="13" /><text x="208" y="207">FC-JKT</text></g>
+        <g className={selectedId === "SHP-1028" ? "map-package selected" : "map-package"}><circle cx="322" cy="132" r="10" /><text x="336" y="136">SHP-1028</text></g>
+        <g className="map-cluster"><circle cx="418" cy="106" r="21" /><text x="410" y="111">{atRisk}</text></g>
+      </svg>
+      <div className="map-legend">
+        <span><i className="blue" />Hub / FC</span>
+        <span><i className="orange" />Traffic corridor</span>
+        <span><i className="red" />SLA risk cluster</span>
+      </div>
+    </div>
+  );
+}
+
+function ComparisonGrid({ impact }) {
+  const current = impact?.current?.metrics || {};
+  const best = impact?.recommended?.metrics || {};
+  const cards = [
+    ["Distance", current.distance_km, best.distance_km, "km"],
+    ["Fuel", current.fuel_liter, best.fuel_liter, "L"],
+    ["Estimated CO2e", current.co2_kg, best.co2_kg, "kg"],
+    ["SLA Risk", current.sla_risk, best.sla_risk, "risk"]
+  ];
+  return (
+    <div className="comparison-grid">
+      {cards.map(([label, baseline, recommended, unit]) => {
+        const delta = safeNumber(recommended) - safeNumber(baseline);
+        const displayDelta = unit === "risk" ? formatPp(delta) : `${delta > 0 ? "+" : ""}${delta.toFixed(2)} ${unit}`;
+        return (
+          <article className="comparison-card" key={label}>
+            <span>{label}</span>
+            <b>{unit === "risk" ? formatPercent(baseline, 1) : `${baseline ?? 0} ${unit}`}</b>
+            <strong>{unit === "risk" ? formatPercent(recommended, 1) : `${recommended ?? 0} ${unit}`}</strong>
+            <small>{displayDelta}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function makeJourneyEvents(shipment, risk, snapshot, simulationState) {
   const id = shipment?.shipment_id || "SHP-1028";
   const delay = risk?.predicted_delay_minutes ?? 14;
@@ -451,59 +540,178 @@ function Overview({ shared }) {
   const providers = useAsync(api.providers, []);
   const hubRisk = useAsync(api.hubRisk, []);
   const fleet = useAsync(api.fleet, []);
+  const interventions = useAsync(() => api.interventions(), []);
   const riskSeries = toSeries(summary.data?.risk_distribution, { Critical: "Critical", High: "High", Medium: "Medium", Low: "Low" });
-  const prioritySeries = toSeries(countBy(shared.shipments, (s) => s.priority));
   const stageSeries = toSeries(countBy(shared.shipments, shipmentStage));
-  const vehicleSeries = toSeries(countBy(shared.vehicles, (v) => v.engine_type || v.fuel_type || v.vehicle_type));
   const providerSeries = toSeries(countBy(providers.data || [], (p) => p.health));
+  const attention = [
+    ...shared.shipments.slice(0, 3).map((shipment) => ({ id: shipment.shipment_id, entity: shipment.shipment_id, stage: shipmentStage(shipment), problem: shipment.priority === "Critical" ? "Critical package priority" : "Watch active journey", severity: shipment.priority, action: "VIEW" })),
+    ...(hubRisk.data || []).slice(0, 2).map((hub) => ({ id: hub.hub_id, entity: hub.hub_id, stage: "Hub", problem: hub.likely_bottleneck || "Congestion watch", severity: hub.risk_level, action: "VIEW HUB" }))
+  ];
   return (
     <>
-      <Header title="Overview" description="A control tower for active packages, SLA exposure, hub pressure, fleet readiness, and carbon impact." />
+      <Header title="B.A.L.O.N Operations" description="Monitor shipment journeys, hub operations, route risk, fleet status, and logistics interventions across the synthetic logistics network." action={<span className="badge">Demo time {new Date().toLocaleTimeString()}</span>} />
       <Status {...summary}>
         {summary.data && (
           <>
-            <div className="metrics-grid">
-              <Card label="Active packages" value={summary.data.active_shipments} detail="current shipment journeys" icon={PackageSearch} />
-              <Card label="High delay risk" value={summary.data.predicted_delayed_shipments} detail="latest risk predictions" tone="orange" icon={AlertTriangle} />
-              <Card label="Critical hubs" value={summary.data.critical_hub_count} detail="network bottleneck watch" tone="red" icon={Network} />
-              <Card label="CO2 today" value={`${summary.data.daily_carbon_estimate_kg} kg`} detail="estimated journey carbon" tone="green" icon={Gauge} />
-              <Card label="Fleet utilization" value={`${summary.data.fleet_utilization.fleet_utilization_score}%`} detail="active vehicle ratio" icon={Truck} />
+            <div className="metrics-grid seven">
+              <Card label="Active packages" value={summary.data.active_shipments} detail="current journeys" icon={PackageSearch} />
+              <Card label="In transit" value={stageSeries.filter((s) => /transport|inter-hub/i.test(s.label)).reduce((a, b) => a + b.value, 0)} detail="moving packages" icon={Route} />
+              <Card label="High / critical SLA" value={summary.data.predicted_delayed_shipments} detail="latest forecast" tone="orange" icon={AlertTriangle} />
+              <Card label="Hub incidents" value={summary.data.critical_hub_count} detail="critical hubs" tone="red" icon={Network} />
+              <Card label="Interventions" value={interventions.data?.length ?? 0} detail="active decisions" tone="orange" icon={Brain} />
+              <Card label="CO2e today" value={`${summary.data.daily_carbon_estimate_kg} kg`} detail="projected routes" tone="green" icon={Gauge} />
+              <Card label="Active vehicles" value={fleet.data?.active_vehicle_count ?? 0} detail={`${fleet.data?.total_vehicle_count ?? shared.vehicles.length} total`} icon={Truck} />
+            </div>
+            <div className="two-col overview-main">
+              <Panel title="Network Operations Map" icon={Map}>
+                <OperationsMap shipments={shared.shipments} hubs={shared.hubs} selectedId="SHP-1028" />
+              </Panel>
+              <Panel title="Packages / Incidents Needing Attention" icon={AlertTriangle}>
+                <EntityTable columns={[
+                  { key: "entity", label: "Entity" },
+                  { key: "stage", label: "Stage" },
+                  { key: "problem", label: "Problem" },
+                  { key: "severity", label: "Severity", render: (row) => <StatusPill tone={riskTone(row.severity)}>{row.severity}</StatusPill> },
+                  { key: "action", label: "Action" }
+                ]} rows={attention} />
+              </Panel>
             </div>
             <div className="viz-grid">
               <BarChart title="SLA Risk Distribution" data={riskSeries} color="#dc2626" />
-              <DonutChart title="Vehicles by Engine Type" data={vehicleSeries} />
-              <HorizontalBars title="Package Journey Stages" data={stageSeries} color="#0f9d8a" />
+              <HorizontalBars title="Shipment Journey Stage Distribution" data={stageSeries} color="#0f9d8a" />
+              <HorizontalBars title="Hub Congestion Overview" data={(hubRisk.data || []).slice(0, 6).map((h) => ({ label: h.hub_id, value: h.congestion_score, color: riskTone(h.risk_level) === "red" ? "#dc2626" : "#f59e0b" }))} unit="/100" color="#f59e0b" />
               <DonutChart title="Provider Health" data={providerSeries.length ? providerSeries : [{ label: "healthy", value: 1 }]} />
-              <BarChart title="Shipment Priority Mix" data={prioritySeries} color="#7c3aed" />
-              <HorizontalBars title="Hub Congestion Score" data={(hubRisk.data || []).slice(0, 6).map((h) => ({ label: h.hub_id, value: h.congestion_score, color: riskTone(h.risk_level) === "red" ? "#dc2626" : "#f59e0b" }))} unit="%" color="#f59e0b" />
+              <DonutChart title="Fleet Status" data={toSeries({ Active: fleet.data?.active_vehicle_count || 0, Idle: fleet.data?.idle_vehicle_count || 0, Maintenance: fleet.data?.maintenance_vehicle_count || 0 })} />
+              <BarChart title="Carbon by Journey Stage" data={[{ label: "Line haul", value: 44 }, { label: "Hub", value: 16 }, { label: "Inter-hub", value: 25 }, { label: "Last mile", value: 15 }]} unit="%" color="#0f9d8a" />
             </div>
-            <div className="two-col">
-              <Panel title="Active Package Journey" icon={PackageSearch}>
-                <JourneyRail shipment={shared.shipments[0] || { shipment_id: "SHP-1028" }} />
-              </Panel>
-              <Panel title="Live Alert Feed" icon={AlertTriangle}>
-                {summary.data.alerts?.length ? summary.data.alerts.map((alert) => (
-                  <article className="alert-card" key={alert.alert_id}>
-                    <b>{alert.severity}: {alert.title}</b>
-                    <p>{alert.message}</p>
-                  </article>
-                )) : <EmptyState>No active alerts. Run a package risk check or demo event to generate interventions.</EmptyState>}
-              </Panel>
-            </div>
-            {fleet.data && (
-              <div className="gauge-grid">
-                <GaugeCard label="Fleet utilization" value={fleet.data.fleet_utilization_score} unit="%" />
-                <GaugeCard label="Active vehicle ratio" value={Math.round(fleet.data.active_vehicle_ratio * 100)} unit="%" tone="green" />
-                <GaugeCard label="Idle vehicles" value={fleet.data.idle_vehicle_count} max={shared.vehicles.length || 1} tone="orange" />
-                <GaugeCard label="High-use vehicles" value={fleet.data.high_use_vehicles?.length || 0} max={shared.vehicles.length || 1} tone="red" />
-              </div>
-            )}
+            <Panel title="Recent Operations Activity" icon={ClipboardList}>
+              <Timeline events={[
+                ...(interventions.data || []).slice(0, 3).map((item) => ({ event_id: item.intervention_id, event_at: item.created_at, title: item.intervention_type.replaceAll("_", " "), description: item.reason, severity: item.severity })),
+                ...summary.data.alerts.slice(0, 4).map((alert) => ({ event_id: alert.alert_id, event_at: alert.created_at, title: alert.title, description: alert.message, severity: alert.severity }))
+              ]} />
+            </Panel>
           </>
         )}
       </Status>
     </>
   );
 }
+
+function PackageTracking({ shared, onOpenPackage }) {
+  const [search, setSearch] = useState("");
+  const [stage, setStage] = useState("All");
+  const rows = shared.shipments.map((shipment, index) => {
+    const currentStage = shipmentStage(shipment);
+    const risk = shipment.priority === "Critical" ? 0.82 : shipment.priority === "Express" ? 0.54 : 0.18 + index * 0.04;
+    return {
+      ...shipment,
+      id: shipment.shipment_id,
+      stage: currentStage,
+      location: currentStage.includes("hub") ? shipment.origin_hub : shipment.destination_zone,
+      eta: shipment.sla_deadline?.slice(11, 16) || "N/A",
+      delay: Math.round(risk * 70),
+      sla_risk: risk,
+      risk_level: risk >= 0.7 ? "Critical" : risk >= 0.5 ? "High" : risk >= 0.3 ? "Medium" : "Low",
+      carbon_so_far: (shipment.route_distance_km * 0.018).toFixed(2),
+      projected_carbon: (shipment.route_distance_km * 0.052).toFixed(2),
+      next: currentStage.includes("hub") ? "Inter-Hub" : "Next milestone",
+      updated: "demo live"
+    };
+  }).filter((row) => (stage === "All" || row.stage === stage) && row.shipment_id.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => b.sla_risk - a.sla_risk);
+  const stages = ["All", ...new Set(shared.shipments.map(shipmentStage))];
+  return (
+    <>
+      <Header title="Package Tracking" description="Track package locations, journey progress, ETA, SLA exposure, vehicles, and upcoming logistics milestones across the network." />
+      <div className="metrics-grid">
+        <Card label="Active packages" value={rows.length} />
+        <Card label="In transit" value={rows.filter((r) => /transport|inter-hub/i.test(r.stage)).length} />
+        <Card label="At hub" value={rows.filter((r) => /hub/i.test(r.stage)).length} />
+        <Card label="Last mile" value={rows.filter((r) => /last/i.test(r.stage)).length} />
+        <Card label="High / critical SLA" value={rows.filter((r) => r.sla_risk >= 0.5).length} tone="orange" />
+      </div>
+      <div className="two-col map-first">
+        <Panel title="Live Package Network Map" icon={Map}>
+          <OperationsMap shipments={rows} hubs={shared.hubs} selectedId={rows[0]?.shipment_id} />
+        </Panel>
+        <Panel title="Tracking Filters" icon={PackageSearch}>
+          <div className="control-row stacked">
+            <input className="text-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search package ID" />
+            <select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select>
+            <p className="muted">Updated just now / synthetic GPS and route-state providers.</p>
+          </div>
+        </Panel>
+      </div>
+      <Panel title="Full Package Tracking Table" icon={ClipboardList}>
+        <EntityTable columns={[
+          { key: "shipment_id", label: "Package" },
+          { key: "priority", label: "Priority" },
+          { key: "stage", label: "Stage", render: (row) => <StatusPill>{row.stage}</StatusPill> },
+          { key: "location", label: "Current Location" },
+          { key: "vehicle_id", label: "Vehicle" },
+          { key: "eta", label: "ETA" },
+          { key: "delay", label: "Delay", render: (row) => `${row.delay} min` },
+          { key: "sla_risk", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{formatPercent(row.sla_risk)}</StatusPill> },
+          { key: "carbon_so_far", label: "CO2 So Far", render: (row) => `${row.carbon_so_far} kg` },
+          { key: "projected_carbon", label: "Projected CO2", render: (row) => `${row.projected_carbon} kg` },
+          { key: "next", label: "Next" },
+          { key: "updated", label: "Freshness" }
+        ]} rows={rows} onSelect={(row) => onOpenPackage(row.shipment_id)} />
+      </Panel>
+    </>
+  );
+}
+
+function HubOperations({ shared }) {
+  const hubRisk = useAsync(api.hubRisk, []);
+  const [selectedHub, setSelectedHub] = useState(shared.hubs[0]?.hub_id || "HUB-BKS");
+  const selected = (hubRisk.data || []).find((hub) => hub.hub_id === selectedHub) || (hubRisk.data || [])[0];
+  const hubPackages = shared.shipments.filter((shipment) => shipment.origin_hub === selectedHub || selectedHub === "HUB-BKS");
+  return (
+    <>
+      <Header title="Hub Operations" description="Monitor hub queue pressure, dwell deviation, process bottlenecks, incidents, and affected packages." />
+      <Status {...hubRisk}>
+        <>
+          <div className="metrics-grid">
+            <Card label="Hubs" value={shared.hubs.length} />
+            <Card label="Critical hubs" value={(hubRisk.data || []).filter((h) => h.risk_level === "Critical").length} tone="red" />
+            <Card label="Affected packages" value={hubPackages.length} tone="orange" />
+            <Card label="Selected hub score" value={selected ? `${selected.congestion_score}/100` : "N/A"} />
+            <Card label="Likely bottleneck" value={selected?.likely_bottleneck || "None"} />
+          </div>
+          <div className="two-col">
+            <Panel title="Hub Risk Table" icon={Network}>
+              <EntityTable columns={[
+                { key: "hub_id", label: "Hub" },
+                { key: "risk_level", label: "Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{row.risk_level}</StatusPill> },
+                { key: "congestion_score", label: "Score", render: (row) => `${row.congestion_score}/100` },
+                { key: "likely_bottleneck", label: "Bottleneck" },
+                { key: "recommendation", label: "Recommendation" }
+              ]} rows={(hubRisk.data || []).map((h) => ({ ...h, id: h.hub_id }))} selectedId={selectedHub} onSelect={(row) => setSelectedHub(row.hub_id)} />
+            </Panel>
+            <Panel title={`${selectedHub} Process Flow`} icon={Activity}>
+              <div className="process-flow">
+                {["Arrival", "Unloading", "Sorting", "Staging", "Loading", "Departure"].map((step, index) => <span key={step} className={index === 2 && selected?.likely_bottleneck ? "hot" : ""}>{step}</span>)}
+              </div>
+              <HorizontalBars title="Process Deviation" data={[{ label: "Queue", value: selected?.congestion_score || 0 }, { label: "Dwell", value: Math.max(0, (selected?.congestion_score || 0) - 20) }, { label: "Sorting", value: selected?.likely_bottleneck ? 82 : 18 }, { label: "Loading", value: 34 }]} color="#f59e0b" />
+            </Panel>
+          </div>
+          <Panel title="Affected Packages" icon={PackageSearch}>
+            <EntityTable columns={[
+              { key: "shipment_id", label: "Package" },
+              { key: "priority", label: "Priority" },
+              { key: "destination_zone", label: "Destination" },
+              { key: "vehicle_id", label: "Vehicle" },
+              { key: "status", label: "Status" }
+            ]} rows={hubPackages.map((shipment) => ({ ...shipment, id: shipment.shipment_id }))} />
+          </Panel>
+        </>
+      </Status>
+    </>
+  );
+}
+
 
 function PackageReports({ shared }) {
   const [shipmentId, setShipmentId] = useState(shared.shipments[0]?.shipment_id || "SHP-1028");
@@ -565,6 +773,8 @@ function PackageReports({ shared }) {
     value: Math.round(value * 100)
   }));
   const hubVisit = view?.current_hub_visit || {};
+  const currentHubDwell = twin?.current?.hub ? `${twin.current.hub.dwell_time_min} min` : "N/A";
+  const currentHubDetail = twin?.current?.hub ? `${twin.current.hub.dwell_excess_min ?? 0} min vs baseline` : "Not currently at a hub";
 
   async function acceptIntervention(interventionId) {
     setBusy(true);
@@ -613,7 +823,7 @@ function PackageReports({ shared }) {
         <Card label="Delay prediction" value={risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} tone={riskTone(risk.sla_level)} />
         <Card label="SLA breach risk" value={risk.sla_probability != null ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} detail={risk.sla_level} tone={riskTone(risk.sla_level)} />
         <Card label="Traffic index" value={current.traffic_index ?? "n/a"} detail="latest provider snapshot" />
-        <Card label="Hub dwell" value={current.hub_dwell_time_min != null ? `${current.hub_dwell_time_min} min` : "n/a"} detail={`${current.hub_dwell_excess_min ?? 0} min vs baseline`} />
+        <Card label="Current hub dwell" value={currentHubDwell} detail={currentHubDetail} />
       </div>
       <div className="two-col">
         <Panel title="Journey Timeline" icon={ClipboardList}>
@@ -631,7 +841,7 @@ function PackageReports({ shared }) {
       </div>
       <div className="viz-grid">
         <HorizontalBars title="Risk Factor Strength" data={factorData.length ? factorData : [{ label: "No material factors yet", value: 5 }]} color="#dc2626" />
-        <DonutChart title="Journey Carbon Allocation" data={carbonData} />
+        <DonutChart title="Carbon Contribution by Journey Stage (%)" data={carbonData} />
         <BarChart title="Hub Processing Minutes" data={[
           { label: "Unload", value: hubVisit.unloading_time_min || 0 },
           { label: "Sort", value: hubVisit.sorting_time_min || 0 },
@@ -653,29 +863,37 @@ function PackageReports({ shared }) {
 function Analytics() {
   const summary = useAsync(api.analytics, []);
   const hubRisk = useAsync(api.hubRisk, []);
+  const impact = summary.data?.route_impact || {};
+  const comparison = {
+    current: { metrics: { distance_km: 44.2, fuel_liter: 2.94, co2_kg: 1.65, sla_risk: 0.31 } },
+    recommended: { metrics: { distance_km: 44.2 - safeNumber(impact.distance_reduction_km), fuel_liter: 2.94 - safeNumber(impact.fuel_reduction_liter), co2_kg: 1.65 - safeNumber(impact.co2_reduction_kg), sla_risk: 0.31 - safeNumber(impact.sla_risk_change) } }
+  };
   return (
     <>
-      <Header title="Analytics" description="Journey-derived delay, carbon, hub dwell, fleet utilization, and AI intervention impact." />
+      <Header title="Analytics" description="Operational intelligence across Delivery, SLA, Hubs, Routes, Carbon & Cost, Fleet, and Forecast Quality." />
       <Status {...summary}>
         {summary.data && (
           <>
             <div className="metrics-grid">
-              <Card label="Distance avoided" value={`${summary.data.route_impact.distance_reduction_km ?? 0} km`} tone="green" />
-              <Card label="Fuel avoided" value={`${summary.data.route_impact.fuel_reduction_liter ?? 0} L`} tone="green" />
-              <Card label="CO2 avoided" value={`${summary.data.route_impact.co2_reduction_kg ?? 0} kg`} tone="green" />
-              <Card label="SLA risk change" value={summary.data.route_impact.sla_risk_change ?? 0} tone="orange" />
+              <Card label="Distance avoided" value={`${impact.distance_reduction_km ?? 0} km`} tone="green" />
+              <Card label="Fuel avoided" value={`${impact.fuel_reduction_liter ?? 0} L`} tone="green" />
+              <Card label="CO2e avoided" value={`${impact.co2_reduction_kg ?? 0} kg`} tone="green" />
+              <Card label="SLA risk change" value={formatPp(-(impact.sla_risk_change ?? 0))} tone="orange" />
               <Card label="Critical hubs" value={summary.data.critical_hub_count} tone="red" />
             </div>
+            <Panel title="Route Intervention Comparison" icon={Brain}>
+              <ComparisonGrid impact={comparison} />
+            </Panel>
             <div className="viz-grid">
               <BarChart title="Delay by Journey Stage" data={[{ label: "Origin", value: 9 }, { label: "Main hub", value: 42 }, { label: "Inter-hub", value: 31 }, { label: "Local hub", value: 18 }, { label: "Last mile", value: 24 }]} unit="m" color="#dc2626" />
-              <DonutChart title="Carbon by Journey Stage" data={[{ label: "Line haul", value: 58 }, { label: "Hub", value: 18 }, { label: "Inter-hub", value: 34 }, { label: "Last mile", value: 41 }]} />
-              <HorizontalBars title="Hub Dwell Pressure" data={(hubRisk.data || []).map((h) => ({ label: h.hub_id, value: h.congestion_score }))} unit="%" color="#f59e0b" />
-              <BarChart title="AI Intervention Impact" data={[{ label: "Time", value: summary.data.route_impact.distance_reduction_km ?? 0 }, { label: "Fuel", value: summary.data.route_impact.fuel_reduction_liter ?? 0 }, { label: "CO2", value: summary.data.route_impact.co2_reduction_kg ?? 0 }, { label: "SLA", value: Math.abs(summary.data.route_impact.sla_risk_change ?? 0) }]} color="#2563eb" />
-              <Heatmap title="Network Risk Matrix" rows={["HUB-JKT", "HUB-BKS", "HUB-TGR", "LM-ZONE"]} columns={["Queue", "Dwell", "SLA", "Carbon"]} values={{ "HUB-JKT-Queue": 71, "HUB-JKT-Dwell": 84, "HUB-JKT-SLA": 67, "HUB-JKT-Carbon": 25, "HUB-BKS-Queue": 48, "HUB-BKS-Dwell": 56, "HUB-BKS-SLA": 42, "HUB-BKS-Carbon": 18, "HUB-TGR-Queue": 25, "HUB-TGR-Dwell": 22, "HUB-TGR-SLA": 19, "HUB-TGR-Carbon": 15, "LM-ZONE-Queue": 36, "LM-ZONE-Dwell": 30, "LM-ZONE-SLA": 51, "LM-ZONE-Carbon": 69 }} />
+              <DonutChart title="Carbon Contribution by Stage (%)" data={[{ label: "Line haul", value: 44 }, { label: "Hub", value: 16 }, { label: "Inter-hub", value: 25 }, { label: "Last mile", value: 15 }]} />
+              <HorizontalBars title="Hub Dwell Pressure" data={(hubRisk.data || []).map((h) => ({ label: h.hub_id, value: h.congestion_score }))} unit="/100" color="#f59e0b" />
+              <Heatmap title="Network Exposure Matrix" rows={["HUB-JKT", "HUB-BKS", "HUB-TGR", "LM-ZONE"]} columns={["Queue", "Dwell", "SLA", "Carbon"]} values={{ "HUB-JKT-Queue": 71, "HUB-JKT-Dwell": 84, "HUB-JKT-SLA": 67, "HUB-JKT-Carbon": 25, "HUB-BKS-Queue": 48, "HUB-BKS-Dwell": 56, "HUB-BKS-SLA": 42, "HUB-BKS-Carbon": 18, "HUB-TGR-Queue": 25, "HUB-TGR-Dwell": 22, "HUB-TGR-SLA": 19, "HUB-TGR-Carbon": 15, "LM-ZONE-Queue": 36, "LM-ZONE-Dwell": 30, "LM-ZONE-SLA": 51, "LM-ZONE-Carbon": 69 }} />
+              <BarChart title="Forecast Quality Sample" data={[{ label: "On-time", value: 81 }, { label: "Late", value: 14 }, { label: "Reforecasted", value: 39 }, { label: "Improved", value: 22 }]} unit="%" color="#2563eb" />
               <div className="chart-card narrative">
-                <h3>Executive Interpretation</h3>
+                <h3>Assumptions</h3>
                 <p>{summary.data.assumptions}</p>
-                <p>{summary.data.route_impact.baseline}</p>
+                <p>SLA deltas are shown in percentage points. Carbon and fuel are displayed as separate physical units.</p>
                 <Sparkline points={[12, 18, 16, 31, 27, 42, 35, 28, 24]} color="#0f9d8a" />
               </div>
             </div>
@@ -687,15 +905,16 @@ function Analytics() {
 }
 
 function RoutePlanning({ shared }) {
-  const [shipmentId, setShipmentId] = useState(shared.shipments[0]?.shipment_id || "SHP-1028");
-  const [vehicleId, setVehicleId] = useState(shared.vehicles[0]?.vehicle_id || "VAN-021");
+  const [shipmentId, setShipmentId] = useState("SHP-1028");
+  const shipment = shared.shipments.find((s) => s.shipment_id === shipmentId) || shared.shipments[0] || {};
+  const assignedVehicleId = shipment.vehicle_id || "VAN-021";
   const [preset, setPreset] = useState("balanced_ai");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   async function run() {
     setBusy(true);
     try {
-      setResult(await api.optimize({ shipment_id: shipmentId, vehicle_id: vehicleId, preset }));
+      setResult(await api.optimize({ shipment_id: shipmentId, vehicle_id: assignedVehicleId, preset }));
     } finally {
       setBusy(false);
     }
@@ -703,33 +922,56 @@ function RoutePlanning({ shared }) {
   const candidates = result?.candidates || [];
   return (
     <>
-      <Header title="Route Planning" description="Map-first comparison of route choices across delivery time, fuel, carbon, SLA reliability, and objective score." />
-      <Panel title="Route Evaluation Inputs" icon={Map}>
+      <Header title="Route Planning" description="Evaluate active routing jobs from the current shipment leg, assigned vehicle, route context, traffic, cost, carbon, and SLA risk." />
+      <Panel title="Active Routing Job" icon={Route}>
+        <div className="route-job">
+          <div><span>Package</span><b>{shipmentId}</b></div>
+          <div><span>Current leg</span><b>{shipmentId === "SHP-1028" ? "HUB-JKT -> HUB-BKS" : `${shipment.origin_hub} -> ${shipment.destination_zone}`}</b></div>
+          <div><span>Assigned vehicle</span><b>{assignedVehicleId}</b></div>
+          <div><span>Current route</span><b>RTE-{shipmentId}-02</b></div>
+        </div>
         <div className="control-grid">
           <select value={shipmentId} onChange={(e) => setShipmentId(e.target.value)}>{shared.shipments.map((s) => <option key={s.shipment_id}>{s.shipment_id}</option>)}</select>
-          <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>{shared.vehicles.map((v) => <option key={v.vehicle_id}>{v.vehicle_id}</option>)}</select>
           <select value={preset} onChange={(e) => setPreset(e.target.value)}>
             <option value="balanced_ai">Balanced AI</option>
-            <option value="fastest">Fastest</option>
-            <option value="greenest">Greenest</option>
+            <option value="fastest">Time Priority</option>
+            <option value="greenest">Green Priority</option>
             <option value="sla_priority">SLA Priority</option>
           </select>
-          <Button onClick={run} busy={busy}>Evaluate Routes</Button>
+          <Button onClick={run} busy={busy}>Evaluate Active Job</Button>
         </div>
       </Panel>
       <div className="two-col map-first">
-        <Panel title="Route Map" icon={Route}><RouteMap candidates={candidates} /></Panel>
-        <Panel title="Recommendation" icon={Brain}>
-          {result ? <><p>{result.explanation}</p><div className="recommendation-badge">{result.selected_candidate || candidates[0]?.candidate_name || "Recommended route"}</div></> : <EmptyState>Choose a shipment, vehicle, and objective, then evaluate routes.</EmptyState>}
+        <Panel title="Geographic Route Map" icon={Map}><RouteMap candidates={candidates} /></Panel>
+        <Panel title="Calculation Methodology" icon={Database}>
+          <div className="method-list">
+            <p><b>Road network:</b> Haversine demo matrix fallback</p>
+            <p><b>Traffic context:</b> Jakarta prototype traffic model</p>
+            <p><b>Vehicle:</b> {assignedVehicleId}</p>
+            <p><b>Fuel / energy:</b> Demo price snapshot</p>
+            <p><b>Carbon factor:</b> CF-DEMO-2026</p>
+          </div>
         </Panel>
       </div>
       {result && (
-        <div className="viz-grid">
-          <BarChart title="Distance by Candidate" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.distance_km }))} unit="km" color="#2563eb" />
-          <BarChart title="Time by Candidate" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.estimated_time_min }))} unit="m" color="#f59e0b" />
-          <BarChart title="CO2 by Candidate" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.co2_kg }))} unit="kg" color="#0f9d8a" />
-          <HorizontalBars title="SLA Risk by Candidate" data={candidates.map((c) => ({ label: c.candidate_name, value: Math.round(c.metrics.sla_risk * 100) }))} unit="%" color="#dc2626" />
-        </div>
+        <>
+          <Panel title="Route Trade-Off Explorer" icon={BarChart3}>
+            <EntityTable columns={[
+              { key: "candidate_name", label: "Candidate" },
+              { key: "distance", label: "Distance", render: (row) => `${row.metrics.distance_km} km` },
+              { key: "time", label: "Time", render: (row) => `${row.metrics.estimated_time_min} min` },
+              { key: "fuel", label: "Fuel", render: (row) => `${row.metrics.fuel_liter} L` },
+              { key: "co2", label: "CO2e", render: (row) => `${row.metrics.co2_kg} kg` },
+              { key: "sla", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.metrics.sla_risk > .5 ? "High" : "Low")}>{formatPercent(row.metrics.sla_risk)}</StatusPill> },
+              { key: "score", label: "Score", render: (row) => row.metrics.objective_score }
+            ]} rows={candidates.map((candidate) => ({ ...candidate, id: candidate.candidate_name }))} />
+          </Panel>
+          <div className="viz-grid">
+            <BarChart title="Distance" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.distance_km }))} unit="km" color="#2563eb" />
+            <BarChart title="Travel Time" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.estimated_time_min }))} unit="m" color="#f59e0b" />
+            <BarChart title="CO2e" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.co2_kg }))} unit="kg" color="#0f9d8a" />
+          </div>
+        </>
       )}
     </>
   );
@@ -748,47 +990,48 @@ function Fleet({ shared }) {
       setBusy(false);
     }
   }
-  const statusSeries = toSeries(countBy(shared.vehicles, (v) => v.status));
-  const typeSeries = toSeries(countBy(shared.vehicles, (v) => v.vehicle_type || v.type));
-  const utilization = shared.vehicles.map((vehicle, index) => ({
-    label: vehicle.vehicle_id,
-    value: safeNumber(vehicle.utilization_score ?? vehicle.daily_distance_km ?? (index + 2) * 11)
-  }));
+  const usage = fleet.data?.vehicle_usage || [];
+  const selectedVehicle = shared.vehicles.find((v) => v.vehicle_id === vehicleId) || {};
   return (
     <>
-      <Header title="Fleet" description="Monitor vehicle utilization, active journey assignments, load balance, and preventive check-up recommendations." />
+      <Header title="Fleet & Vehicles" description="Track vehicle utilization, driver context, active package assignments, distance, fuel or energy cost, carbon, and preventive check-up recommendations." />
       <Status {...fleet}>
         {fleet.data && (
           <>
             <div className="metrics-grid">
-              <Card label="Total vehicles" value={shared.vehicles.length} />
-              <Card label="Active ratio" value={`${Math.round(fleet.data.active_vehicle_ratio * 100)}%`} tone="green" />
+              <Card label="Total vehicles" value={fleet.data.total_vehicle_count} />
+              <Card label="Active vehicles" value={fleet.data.active_vehicle_count} tone="green" />
               <Card label="Idle vehicles" value={fleet.data.idle_vehicle_count} tone="orange" />
+              <Card label="Average utilization" value={formatPercent(fleet.data.average_utilization_ratio)} />
               <Card label="High-use vehicles" value={fleet.data.high_use_vehicles?.length || 0} tone="red" />
-              <Card label="Utilization score" value={`${fleet.data.fleet_utilization_score}%`} />
             </div>
             <div className="viz-grid">
-              <HorizontalBars title="Vehicle Utilization" data={utilization} color="#2563eb" />
-              <DonutChart title="Fleet Status" data={statusSeries} />
-              <DonutChart title="Vehicle Types" data={typeSeries} />
-              <BarChart title="Estimated Distance Today" data={utilization.slice(0, 7)} unit="km" color="#0f9d8a" />
+              <HorizontalBars title="Vehicle Utilization" data={usage.map((u) => ({ label: u.vehicle_id, value: Math.round(u.utilization_ratio * 100) }))} unit="%" color="#2563eb" />
+              <DonutChart title="Fleet Status" data={toSeries({ Active: fleet.data.active_vehicle_count, Idle: fleet.data.idle_vehicle_count, Maintenance: fleet.data.maintenance_vehicle_count, Unavailable: fleet.data.unavailable_vehicle_count })} />
+              <BarChart title="Distance Today" data={usage.map((u) => ({ label: u.vehicle_id, value: u.distance_today_km }))} unit="km" color="#0f9d8a" />
             </div>
+            <Panel title="Vehicle Operations Table" icon={Truck}>
+              <EntityTable columns={[
+                { key: "vehicle_id", label: "Vehicle" },
+                { key: "status", label: "Status", render: (row) => <StatusPill tone={row.status === "Active" ? "green" : "orange"}>{row.status}</StatusPill> },
+                { key: "shipment_count", label: "Packages" },
+                { key: "utilization_ratio", label: "Utilization", render: (row) => formatPercent(row.utilization_ratio) },
+                { key: "load_utilization", label: "Load", render: (row) => formatPercent(row.load_utilization) },
+                { key: "distance_today_km", label: "Distance" , render: (row) => `${row.distance_today_km} km` },
+                { key: "active_operating_minutes", label: "Active min" }
+              ]} rows={usage.map((u) => ({ ...u, id: u.vehicle_id }))} selectedId={vehicleId} onSelect={(row) => setVehicleId(row.vehicle_id)} />
+            </Panel>
           </>
         )}
       </Status>
-      <Panel title="Preventive Check-Up Recommendation" icon={Truck}>
-        <div className="control-row">
-          <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>{shared.vehicles.map((v) => <option key={v.vehicle_id}>{v.vehicle_id}</option>)}</select>
-          <Button onClick={checkVehicle} busy={busy} secondary>Analyze Vehicle</Button>
+      <Panel title={`${vehicleId} Vehicle Digital Twin`} icon={Truck}>
+        <div className="twin-grid">
+          <TwinCard title="Assignment" rows={[{ label: "Driver", value: vehicleId.startsWith("MTR") ? "Courier Dimas" : "Driver Raka" }, { label: "Current package", value: shared.shipments.find((s) => s.vehicle_id === vehicleId)?.shipment_id || "None" }, { label: "Status", value: selectedVehicle.status || "N/A" }]} />
+          <TwinCard title="Utilization" tone="green" rows={[{ label: "Active minutes", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.active_operating_minutes || 0} min` }, { label: "Available minutes", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.available_operating_minutes || 0} min` }, { label: "Distance today", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.distance_today_km || 0} km` }]} />
+          <TwinCard title="Cost / Carbon" tone="orange" rows={[{ label: "Fuel or energy", value: selectedVehicle.fuel_type || "N/A" }, { label: "Efficiency", value: `${selectedVehicle.fuel_efficiency_km_per_liter || 0} km/L` }, { label: "Estimated cost", value: "Rp87,040" }]} />
+          <TwinCard title="Maintenance" tone="red" rows={[{ label: "Last service", value: selectedVehicle.last_service_date || "N/A" }, { label: "Current KM", value: selectedVehicle.current_km || 0 }, { label: "Next action", value: maintenance?.risk_level || "Check when selected" }]} />
         </div>
-        {maintenance && (
-          <div className="gauge-grid">
-            <GaugeCard label="Operational health" value={maintenance.health_score} unit="%" tone={riskTone(maintenance.risk_level)} />
-            <GaugeCard label="Check-up window" value={maintenance.recommended_checkup_days} max={60} unit="d" tone="orange" />
-            <Card label="Risk" value={maintenance.risk_level} tone={riskTone(maintenance.risk_level)} />
-            <Card label="Provenance" value={maintenance.source} />
-          </div>
-        )}
+        <div className="control-row"><Button onClick={checkVehicle} busy={busy} secondary>Analyze Preventive Check-Up</Button></div>
       </Panel>
     </>
   );
@@ -803,7 +1046,7 @@ function DataModels() {
   const providerSeries = toSeries(countBy(providers.data || [], (p) => p.source_type));
   return (
     <>
-      <Header title="Data & Models" description="Technical transparency for provider health, model availability, training data, fallback logic, and provenance." />
+      <Header title="Data, Models & Assumptions" description="Technical transparency for providers, model runtime state, traffic assumptions, fuel and energy prices, carbon factors, hub baselines, and SLA thresholds." />
       <Status {...models}>
         <>
           <div className="viz-grid">
@@ -812,6 +1055,16 @@ function DataModels() {
             <HorizontalBars title="Training Dataset Readiness" data={Object.entries(training.data || {}).map(([key, value]) => ({ label: key, value: safeNumber(value.rows || value.row_count || value.count || 1) }))} color="#7c3aed" />
             <HorizontalBars title="Data Source Count" data={Object.entries(dataSources.data || {}).map(([key, value]) => ({ label: key, value: Array.isArray(value) ? value.length : 1 }))} color="#0f9d8a" />
           </div>
+          <Panel title="Operational Assumptions Registry" icon={Database}>
+            <div className="assumption-grid">
+              <article><b>Traffic model</b><span>Jakarta Prototype Traffic Profile / synthetic multipliers</span></article>
+              <article><b>Fuel prices</b><span>Diesel Rp6,800/L, gasoline Rp10,000/L</span></article>
+              <article><b>Energy price</b><span>EV charging Rp1,444/kWh</span></article>
+              <article><b>Carbon factors</b><span>CF-DEMO-2026, deterministic baseline</span></article>
+              <article><b>Hub baselines</b><span>Hub normal dwell profiles from seeded hub table</span></article>
+              <article><b>SLA thresholds</b><span>Low / Medium / High / Critical probability bands</span></article>
+            </div>
+          </Panel>
           {providers.data && (
             <Panel title="Data Providers" icon={Network}>
               <div className="provider-grid">
@@ -857,10 +1110,15 @@ function App() {
           <div><strong>B.A.L.O.N</strong><span>Shipment Journey Intelligence</span></div>
         </div>
         <nav>
-          {nav.map(([label, Icon]) => (
-            <button key={label} className={page === label ? "active" : ""} onClick={() => setPage(label)}>
-              <Icon size={18} /> {label}
-            </button>
+          {navSections.map((section) => (
+            <div className="nav-section" key={section.label}>
+              <span>{section.label}</span>
+              {section.items.map(([label, Icon]) => (
+                <button key={label} className={page === label ? "active" : ""} onClick={() => setPage(label)}>
+                  <Icon size={18} /> {label}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-footer">
@@ -872,11 +1130,13 @@ function App() {
       <main>
         <Status {...bootstrap}>
           {page === "Overview" && <Overview shared={shared} />}
+          {page === "Package Tracking" && <PackageTracking shared={shared} onOpenPackage={(id) => setPage("Package Reports")} />}
           {page === "Package Reports" && <PackageReports shared={shared} />}
-          {page === "Analytics" && <Analytics />}
+          {page === "Hub Operations" && <HubOperations shared={shared} />}
           {page === "Route Planning" && <RoutePlanning shared={shared} />}
-          {page === "Fleet" && <Fleet shared={shared} />}
-          {page === "Data & Models" && <DataModels />}
+          {page === "Fleet & Vehicles" && <Fleet shared={shared} />}
+          {page === "Analytics" && <Analytics />}
+          {page === "Data, Models & Assumptions" && <DataModels />}
         </Status>
       </main>
     </div>
