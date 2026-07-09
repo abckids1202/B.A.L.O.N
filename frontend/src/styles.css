@@ -742,3 +742,98 @@ code { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 880px) {
   .metrics-grid.seven, .comparison-grid, .route-job, .assumption-grid, .process-flow { grid-template-columns: 1fr; }
 }
+
+
+.flow-canvas {
+  background: #f8fbff;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  padding: 12px;
+}
+.flow-canvas svg { width: 100%; min-height: 330px; display: block; }
+.flow-edge path {
+  fill: none;
+  stroke: #22c55e;
+  stroke-linecap: round;
+  opacity: .72;
+}
+.flow-edge.medium path { stroke: #f59e0b; }
+.flow-edge.high path, .flow-edge.orange path { stroke: #f97316; }
+.flow-edge.intervention path { stroke: #7c3aed; stroke-dasharray: 10 8; }
+.flow-edge text { fill: #334155; font-size: 12px; font-weight: 900; }
+.flow-node circle {
+  fill: #eef5ff;
+  stroke: #2563eb;
+  stroke-width: 4;
+}
+.flow-node.orange circle { stroke: #f97316; fill: #fff7ed; }
+.flow-node.red circle { stroke: #dc2626; fill: #fef2f2; }
+.flow-node.green circle { stroke: #0f9d8a; fill: #ecfdf5; }
+.flow-node text {
+  text-anchor: middle;
+  fill: #0f172a;
+  font-size: 11px;
+  font-weight: 900;
+}
+.flow-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.toolbar span {
+  background: #eef5ff;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+}
+.entity-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  background: #eef5ff;
+  border: 1px solid #dbeafe;
+  border-left: 5px solid #2563eb;
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.entity-hero b { display: block; font-size: 20px; }
+.entity-hero span { color: #334155; font-weight: 750; }
+.tracking-map {
+  background: #eef5ff;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  padding: 12px;
+}
+.tracking-map svg { width: 100%; min-height: 300px; display: block; }
+.tracking-map rect { fill: #f8fbff; stroke: #c7d9f5; }
+.geo-route {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 8;
+  stroke-linecap: round;
+}
+.geo-pin { stroke: white; stroke-width: 4; }
+.geo-pin.origin { fill: #0f9d8a; }
+.geo-pin.hub { fill: #f59e0b; }
+.geo-pin.destination { fill: #2563eb; }
+.geo-pin.package { fill: #dc2626; }
+.tracking-map text { fill: #334155; font-weight: 800; font-size: 13px; }
+.bento-grid {
+  display: grid;
+  gap: 12px;
+}
+.event-impact h3 { margin: 12px 0 4px; }

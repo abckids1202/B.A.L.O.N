@@ -22,7 +22,7 @@ import { api } from "./api";
 import "./styles.css";
 
 const navSections = [
-  { label: "Operations", items: [["Overview", Activity], ["Package Tracking", PackageSearch], ["Package Reports", ClipboardList], ["Hub Operations", Network], ["Route Planning", Route]] },
+  { label: "Operations", items: [["Overview", Activity], ["Live Operations", Play], ["Package Tracking", PackageSearch], ["Package Reports", ClipboardList], ["Hub Operations", Network], ["Route Planning", Route]] },
   { label: "Resources", items: [["Fleet & Vehicles", Truck], ["Analytics", BarChart3]] },
   { label: "System", items: [["Data, Models & Assumptions", Server]] }
 ];
@@ -458,6 +458,124 @@ function EntityTable({ columns, rows, selectedId, onSelect }) {
   );
 }
 
+
+function NetworkFlowCanvas({ shipments = [], hubs = [], interventions = [] }) {
+  const active = shipments.filter((s) => s.status === "Active").length;
+  const atRisk = shipments.filter((s) => s.priority === "Critical" || s.priority === "Express").length;
+  const nodes = [
+    { id: "FC-JKT-01", type: "Fulfillment", x: 70, y: 82, packages: Math.max(8, active), risk: "Low" },
+    { id: "FC-JKT-02", type: "Fulfillment", x: 70, y: 202, packages: 18, risk: "Low" },
+    { id: "HUB-JKT", type: "Main Hub", x: 235, y: 128, packages: 82, risk: "Critical", dwell: 83 },
+    { id: "HUB-TNG", type: "Main Hub", x: 235, y: 230, packages: 28, risk: "Medium", dwell: 29 },
+    { id: "HUB-BKS", type: "Local Hub", x: 398, y: 118, packages: 46, risk: atRisk ? "High" : "Medium", dwell: 37 },
+    { id: "BEKASI LM", type: "Last Mile", x: 560, y: 118, packages: 31, risk: "High" },
+    { id: "DEPOK LM", type: "Last Mile", x: 560, y: 228, packages: 16, risk: "Low" }
+  ];
+  const edges = [
+    ["FC-JKT-01", "HUB-JKT", 44, "Low"],
+    ["FC-JKT-02", "HUB-JKT", 21, "Medium"],
+    ["FC-JKT-02", "HUB-TNG", 16, "Low"],
+    ["HUB-JKT", "HUB-BKS", 46, interventions.length ? "Intervention" : "High"],
+    ["HUB-BKS", "BEKASI LM", 31, "High"],
+    ["HUB-TNG", "DEPOK LM", 16, "Low"]
+  ];
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  return (
+    <div className="flow-canvas">
+      <svg viewBox="0 0 640 320" role="img" aria-label="Network operations flow canvas">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L6,3 z" fill="#64748b" />
+          </marker>
+        </defs>
+        {edges.map(([from, to, volume, risk]) => {
+          const a = byId[from];
+          const b = byId[to];
+          const width = Math.max(4, Math.min(14, volume / 4));
+          return (
+            <g key={`${from}-${to}`} className={`flow-edge ${risk.toLowerCase()}`}>
+              <path d={`M${a.x + 42} ${a.y} C ${a.x + 95} ${a.y}, ${b.x - 95} ${b.y}, ${b.x - 42} ${b.y}`} style={{ strokeWidth: width }} markerEnd="url(#arrow)" />
+              <text x={(a.x + b.x) / 2 - 16} y={(a.y + b.y) / 2 - 8}>{volume}</text>
+            </g>
+          );
+        })}
+        {nodes.map((node) => (
+          <g key={node.id} className={`flow-node ${riskTone(node.risk)}`} transform={`translate(${node.x}, ${node.y})`}>
+            <circle r={Math.max(24, Math.min(42, node.packages / 2))} />
+            <text y="-4">{node.id}</text>
+            <text y="13">{node.packages} pkg</text>
+            {node.dwell && <text y="29">{node.dwell}m dwell</text>}
+          </g>
+        ))}
+      </svg>
+      <div className="flow-summary">
+        <span>Node size = active packages</span>
+        <span>Edge width = package flow</span>
+        <span>Purple corridor = active intervention</span>
+      </div>
+    </div>
+  );
+}
+
+function makeTrackingRows(shipments) {
+  const stages = ["LINE_HAUL", "MAIN_HUB_PROCESSING", "INTER_HUB", "LOCAL_HUB_PROCESSING", "LAST_MILE", "ORIGIN_PROCESSING"];
+  const locations = ["FC-JKT -> HUB-JKT", "HUB-JKT", "HUB-JKT -> HUB-BKS", "HUB-BKS", "Bekasi Timur", "FC-JKT"];
+  const drivers = ["Andi Pratama", "Raka Wijaya", "Dimas Putra", "Maya Sari", "Bima Ardi"];
+  return shipments.flatMap((shipment, baseIndex) => {
+    const copies = shipments.length < 20 ? 8 : 1;
+    return Array.from({ length: copies }, (_, offset) => {
+      const index = baseIndex * copies + offset;
+      const stage = stages[index % stages.length];
+      const risk = shipment.priority === "Critical" ? .82 : shipment.priority === "Express" ? .61 : Math.max(.08, .18 + ((index * 7) % 58) / 100);
+      const riskLevel = risk >= .7 ? "Critical" : risk >= .5 ? "High" : risk >= .3 ? "Medium" : "Low";
+      const id = offset ? `${shipment.shipment_id}-${String(offset + 1).padStart(2, "0")}` : shipment.shipment_id;
+      return {
+        ...shipment,
+        id,
+        shipment_id: id,
+        stage,
+        stage_label: stage.replaceAll("_", " "),
+        current_location: locations[index % locations.length],
+        origin_label: index % 2 ? "FC-JKT-02" : "FC-JKT-01",
+        destination_label: shipment.destination_zone,
+        driver_name: drivers[index % drivers.length],
+        eta: shipment.sla_deadline?.slice(11, 16) || "14:42",
+        predicted_delay_min: Math.round(risk * 72),
+        sla_probability: risk,
+        risk_level: riskLevel,
+        actual_carbon_kg: +(shipment.route_distance_km * (0.012 + (index % 4) * .002)).toFixed(2),
+        projected_carbon_kg: +(shipment.route_distance_km * .052).toFixed(2),
+        next_milestone: stage.includes("HUB") ? "HUB-BKS" : stage === "LAST_MILE" ? "Buyer" : "HUB-JKT",
+        gps_age_seconds: 8 + (index % 9) * 11,
+        last_updated: `${8 + index % 12} sec ago`,
+        lat: -6.2088 - (index % 6) * .013,
+        lon: 106.8456 + (index % 7) * .027,
+        speed_kmh: stage.includes("HUB") || stage.includes("ORIGIN") ? 0 : 24 + (index % 8) * 3,
+        route_progress: Math.min(96, 8 + (index * 13) % 88),
+      };
+    });
+  });
+}
+
+function TrackingMap({ row }) {
+  return (
+    <div className="tracking-map">
+      <svg viewBox="0 0 560 300" role="img" aria-label="Selected package tracking map">
+        <rect x="16" y="16" width="528" height="268" rx="16" />
+        <path d="M78 210 C162 122 252 176 332 112 S444 88 494 148" className="geo-route" />
+        <circle cx="78" cy="210" r="12" className="geo-pin origin" />
+        <circle cx="332" cy="112" r="14" className="geo-pin hub" />
+        <circle cx="494" cy="148" r="13" className="geo-pin destination" />
+        <circle cx={90 + (row?.route_progress || 40) * 3.8} cy={190 - (row?.route_progress || 40) * .72} r="11" className="geo-pin package" />
+        <text x="60" y="238">Origin</text>
+        <text x="306" y="92">Hub</text>
+        <text x="454" y="134">Next</text>
+        <text x="34" y="42">{row?.shipment_id || "Select a package"}</text>
+      </svg>
+    </div>
+  );
+}
+
 function OperationsMap({ shipments = [], hubs = [], selectedId }) {
   const coords = {
     "HUB-JKT": [245, 118],
@@ -564,8 +682,8 @@ function Overview({ shared }) {
               <Card label="Active vehicles" value={fleet.data?.active_vehicle_count ?? 0} detail={`${fleet.data?.total_vehicle_count ?? shared.vehicles.length} total`} icon={Truck} />
             </div>
             <div className="two-col overview-main">
-              <Panel title="Network Operations Map" icon={Map}>
-                <OperationsMap shipments={shared.shipments} hubs={shared.hubs} selectedId="SHP-1028" />
+              <Panel title="Network Operations Flow Canvas" icon={Map}>
+                <NetworkFlowCanvas shipments={shared.shipments} hubs={shared.hubs} interventions={interventions.data || []} />
               </Panel>
               <Panel title="Packages / Incidents Needing Attention" icon={AlertTriangle}>
                 <EntityTable columns={[
@@ -601,64 +719,81 @@ function Overview({ shared }) {
 function PackageTracking({ shared, onOpenPackage }) {
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState("All");
-  const rows = shared.shipments.map((shipment, index) => {
-    const currentStage = shipmentStage(shipment);
-    const risk = shipment.priority === "Critical" ? 0.82 : shipment.priority === "Express" ? 0.54 : 0.18 + index * 0.04;
-    return {
-      ...shipment,
-      id: shipment.shipment_id,
-      stage: currentStage,
-      location: currentStage.includes("hub") ? shipment.origin_hub : shipment.destination_zone,
-      eta: shipment.sla_deadline?.slice(11, 16) || "N/A",
-      delay: Math.round(risk * 70),
-      sla_risk: risk,
-      risk_level: risk >= 0.7 ? "Critical" : risk >= 0.5 ? "High" : risk >= 0.3 ? "Medium" : "Low",
-      carbon_so_far: (shipment.route_distance_km * 0.018).toFixed(2),
-      projected_carbon: (shipment.route_distance_km * 0.052).toFixed(2),
-      next: currentStage.includes("hub") ? "Inter-Hub" : "Next milestone",
-      updated: "demo live"
-    };
-  }).filter((row) => (stage === "All" || row.stage === stage) && row.shipment_id.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => b.sla_risk - a.sla_risk);
-  const stages = ["All", ...new Set(shared.shipments.map(shipmentStage))];
+  const [selectedId, setSelectedId] = useState("SHP-1028");
+  const rows = makeTrackingRows(shared.shipments)
+    .filter((row) => (stage === "All" || row.stage === stage) && row.shipment_id.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => b.sla_probability - a.sla_probability);
+  const selected = rows.find((row) => row.shipment_id === selectedId) || rows[0];
+  const stages = ["All", ...new Set(makeTrackingRows(shared.shipments).map((row) => row.stage))];
   return (
     <>
-      <Header title="Package Tracking" description="Track package locations, journey progress, ETA, SLA exposure, vehicles, and upcoming logistics milestones across the network." />
+      <Header title="Package Tracking" description="Monitor active package locations, ETA, journey progress, SLA exposure, and the next logistics milestone." action={<span className="badge">Last update 8 sec ago</span>} />
       <div className="metrics-grid">
         <Card label="Active packages" value={rows.length} />
-        <Card label="In transit" value={rows.filter((r) => /transport|inter-hub/i.test(r.stage)).length} />
-        <Card label="At hub" value={rows.filter((r) => /hub/i.test(r.stage)).length} />
-        <Card label="Last mile" value={rows.filter((r) => /last/i.test(r.stage)).length} />
-        <Card label="High / critical SLA" value={rows.filter((r) => r.sla_risk >= 0.5).length} tone="orange" />
+        <Card label="In transit" value={rows.filter((r) => /HAUL|INTER_HUB/.test(r.stage)).length} />
+        <Card label="At hub" value={rows.filter((r) => /HUB_PROCESSING/.test(r.stage)).length} />
+        <Card label="Last mile" value={rows.filter((r) => /LAST_MILE/.test(r.stage)).length} />
+        <Card label="High / critical SLA" value={rows.filter((r) => r.sla_probability >= 0.5).length} tone="orange" />
       </div>
-      <div className="two-col map-first">
-        <Panel title="Live Package Network Map" icon={Map}>
-          <OperationsMap shipments={rows} hubs={shared.hubs} selectedId={rows[0]?.shipment_id} />
-        </Panel>
-        <Panel title="Tracking Filters" icon={PackageSearch}>
-          <div className="control-row stacked">
-            <input className="text-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search package ID" />
-            <select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select>
-            <p className="muted">Updated just now / synthetic GPS and route-state providers.</p>
-          </div>
-        </Panel>
-      </div>
-      <Panel title="Full Package Tracking Table" icon={ClipboardList}>
+      <Panel title="Package Operations Table" icon={ClipboardList}>
+        <div className="toolbar">
+          <input className="text-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search package ID" />
+          <select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select>
+          <span>View: Table + Detail</span>
+          <span>Auto refresh: Off</span>
+        </div>
         <EntityTable columns={[
           { key: "shipment_id", label: "Package" },
           { key: "priority", label: "Priority" },
-          { key: "stage", label: "Stage", render: (row) => <StatusPill>{row.stage}</StatusPill> },
-          { key: "location", label: "Current Location" },
+          { key: "status", label: "Status" },
+          { key: "stage", label: "Stage", render: (row) => <StatusPill>{row.stage_label}</StatusPill> },
+          { key: "current_location", label: "Current Location" },
+          { key: "origin_label", label: "Origin" },
+          { key: "destination_label", label: "Destination" },
           { key: "vehicle_id", label: "Vehicle" },
+          { key: "driver_name", label: "Driver" },
           { key: "eta", label: "ETA" },
-          { key: "delay", label: "Delay", render: (row) => `${row.delay} min` },
-          { key: "sla_risk", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{formatPercent(row.sla_risk)}</StatusPill> },
-          { key: "carbon_so_far", label: "CO2 So Far", render: (row) => `${row.carbon_so_far} kg` },
-          { key: "projected_carbon", label: "Projected CO2", render: (row) => `${row.projected_carbon} kg` },
-          { key: "next", label: "Next" },
-          { key: "updated", label: "Freshness" }
-        ]} rows={rows} onSelect={(row) => onOpenPackage(row.shipment_id)} />
+          { key: "predicted_delay_min", label: "Delay", render: (row) => `${row.predicted_delay_min} min` },
+          { key: "sla_probability", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{formatPercent(row.sla_probability, 1)}</StatusPill> },
+          { key: "actual_carbon_kg", label: "CO2 So Far", render: (row) => `${row.actual_carbon_kg.toFixed(2)} kg` },
+          { key: "projected_carbon_kg", label: "Projected CO2", render: (row) => `${row.projected_carbon_kg.toFixed(2)} kg` },
+          { key: "next_milestone", label: "Next" },
+          { key: "last_updated", label: "Last Update" }
+        ]} rows={rows} selectedId={selected?.shipment_id} onSelect={(row) => setSelectedId(row.shipment_id)} />
       </Panel>
+      {selected && (
+        <Panel title={`${selected.shipment_id} Tracking Digital Twin`} icon={PackageSearch}>
+          <div className="entity-hero">
+            <div><b>{selected.shipment_id}</b><span>{selected.stage_label}</span></div>
+            <StatusPill tone={riskTone(selected.risk_level)}>{formatPercent(selected.sla_probability, 1)} SLA Risk / {selected.risk_level}</StatusPill>
+            <span>{selected.current_location}</span>
+            <span>{selected.vehicle_id} / {selected.driver_name}</span>
+            <span>GPS {selected.gps_age_seconds} sec ago</span>
+          </div>
+          <div className="two-col map-first">
+            <TrackingMap row={selected} />
+            <div className="bento-grid">
+              <TwinCard title="Current Tracking State" rows={[
+                { label: "Coordinates", value: `${selected.lat.toFixed(4)}, ${selected.lon.toFixed(4)}` },
+                { label: "Speed", value: `${selected.speed_kmh} km/h` },
+                { label: "Route progress", value: `${selected.route_progress}%` },
+                { label: "Next milestone", value: selected.next_milestone }
+              ]} />
+              <TwinCard title="Forecast" tone="orange" rows={[
+                { label: "ETA", value: selected.eta },
+                { label: "Predicted delay", value: `${selected.predicted_delay_min} min` },
+                { label: "SLA buffer", value: `${Math.max(0, 90 - selected.predicted_delay_min)} min` },
+                { label: "Traffic", value: selected.sla_probability > .5 ? "High" : "Normal" }
+              ]} />
+            </div>
+          </div>
+          <div className="control-row">
+            <Button onClick={() => onOpenPackage(selected.shipment_id)}>Open Full Package Report</Button>
+            <Button secondary>View Current Route</Button>
+            <Button secondary>Follow in Live Operations</Button>
+          </div>
+        </Panel>
+      )}
     </>
   );
 }
@@ -712,6 +847,79 @@ function HubOperations({ shared }) {
   );
 }
 
+
+
+function LiveOperations({ shared }) {
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [speed, setSpeed] = useState("5x");
+  useEffect(() => { api.simulationState().then(setState).catch(() => null); }, []);
+  async function action(fn) {
+    setBusy(true);
+    try {
+      setState(await fn());
+    } finally {
+      setBusy(false);
+    }
+  }
+  const processed = (state?.events || []).filter((event) => event.processed).length;
+  const total = state?.events?.length || 0;
+  const latest = state?.processed_event || (state?.events || []).filter((event) => event.processed).slice(-1)[0];
+  return (
+    <>
+      <Header title="Live Operations" description="Replay the synthetic logistics network, process operational events, update package state, create interventions, and watch the network continue toward delivery." action={<span className="badge">Speed {speed}</span>} />
+      <div className="metrics-grid">
+        <Card label="Runtime status" value={state?.state?.status || "Paused"} />
+        <Card label="Demo step" value={state?.state?.current_step ?? 0} />
+        <Card label="Events processed" value={`${processed}/${total}`} />
+        <Card label="Focused package" value={state?.state?.active_shipment_id || "SHP-1028"} />
+        <Card label="Alerts" value={state?.alerts?.length || 0} tone="orange" />
+      </div>
+      <Panel title="Replay Controls" icon={Play}>
+        <div className="control-row">
+          <Button secondary busy={busy} onClick={() => action(api.simulationReset)}>Reset</Button>
+          <Button busy={busy} onClick={() => action(api.simulationNext)}>Step Event</Button>
+          <select value={speed} onChange={(event) => setSpeed(event.target.value)}><option>1x</option><option>2x</option><option>5x</option><option>10x</option></select>
+          <span className="muted">Backend simulation state is authoritative; this page calls the same event pipeline as Package Reports.</span>
+        </div>
+      </Panel>
+      <div className="two-col overview-main">
+        <Panel title="Live Network Flow" icon={Map}>
+          <NetworkFlowCanvas shipments={shared.shipments} hubs={shared.hubs} interventions={state?.alerts || []} />
+        </Panel>
+        <Panel title="Latest Event Impact" icon={Activity}>
+          {latest ? (
+            <div className="event-impact">
+              <StatusPill tone="orange">{latest.event_type || "EVENT"}</StatusPill>
+              <h3>{latest.entity_id || "SHP-1028"}</h3>
+              <p>{latest.payload?.description || "Operational event processed through the demo pipeline."}</p>
+              <div className="comparison-grid">
+                <article className="comparison-card"><span>Before</span><strong>Previous forecast</strong><small>stored in prediction history</small></article>
+                <article className="comparison-card"><span>Event</span><strong>{latest.event_type || "Next event"}</strong><small>{latest.timestamp || state?.state?.current_timestamp}</small></article>
+                <article className="comparison-card"><span>After</span><strong>State updated</strong><small>risk, route, hub and alerts refreshed</small></article>
+                <article className="comparison-card"><span>Action</span><strong>{state?.route_recommendation?.candidate_name || "Monitor"}</strong><small>decision engine result</small></article>
+              </div>
+            </div>
+          ) : <EmptyState>Reset or step the demo to process the first operational event.</EmptyState>}
+        </Panel>
+      </div>
+      <div className="viz-grid">
+        <BarChart title="Active Packages Over Demo Time" data={[{ label: "T0", value: 4 }, { label: "T1", value: 4 }, { label: "T2", value: 3 }, { label: "T3", value: 2 }]} color="#2563eb" />
+        <BarChart title="High / Critical SLA Packages" data={[{ label: "T0", value: 1 }, { label: "T1", value: 2 }, { label: "T2", value: 3 }, { label: "T3", value: 1 }]} color="#dc2626" />
+        <BarChart title="Interventions Created / Resolved" data={[{ label: "Created", value: Math.max(0, processed - 2) }, { label: "Resolved", value: Math.max(0, processed - 5) }]} color="#7c3aed" />
+      </div>
+      <Panel title="Recent Event Stream" icon={ClipboardList}>
+        <Timeline events={(state?.events || []).filter((event) => event.processed).slice(-8).map((event) => ({
+          event_id: event.event_id,
+          event_at: event.timestamp,
+          title: event.event_type,
+          description: event.payload?.description || `${event.entity_id} processed`,
+          severity: event.payload?.severity || "Info"
+        }))} />
+      </Panel>
+    </>
+  );
+}
 
 function PackageReports({ shared }) {
   const [shipmentId, setShipmentId] = useState(shared.shipments[0]?.shipment_id || "SHP-1028");
@@ -905,16 +1113,23 @@ function Analytics() {
 }
 
 function RoutePlanning({ shared }) {
-  const [shipmentId, setShipmentId] = useState("SHP-1028");
-  const shipment = shared.shipments.find((s) => s.shipment_id === shipmentId) || shared.shipments[0] || {};
-  const assignedVehicleId = shipment.vehicle_id || "VAN-021";
+  const jobs = makeTrackingRows(shared.shipments).slice(0, 24).map((row, index) => ({
+    ...row,
+    id: `LEG-${row.shipment_id}-${String(index % 3 + 1).padStart(2, "0")}`,
+    route_id: `RTE-${row.shipment_id}-${String(index % 3 + 1).padStart(2, "0")}`,
+    job_type: row.stage.includes("LAST") ? "Last-mile batch" : "Transport leg",
+    corridor: row.current_location.includes("->") ? row.current_location : `${row.origin_label} -> ${row.destination_label}`,
+    active_jobs: 1 + (index % 4)
+  }));
+  const [selectedJobId, setSelectedJobId] = useState(jobs[0]?.id || "LEG-SHP-1028-02");
+  const selected = jobs.find((job) => job.id === selectedJobId) || jobs[0];
   const [preset, setPreset] = useState("balanced_ai");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   async function run() {
     setBusy(true);
     try {
-      setResult(await api.optimize({ shipment_id: shipmentId, vehicle_id: assignedVehicleId, preset }));
+      setResult(await api.optimize({ shipment_id: selected.shipment_id.split("-").slice(0, 2).join("-"), vehicle_id: selected.vehicle_id, preset }));
     } finally {
       setBusy(false);
     }
@@ -922,56 +1137,62 @@ function RoutePlanning({ shared }) {
   const candidates = result?.candidates || [];
   return (
     <>
-      <Header title="Route Planning" description="Evaluate active routing jobs from the current shipment leg, assigned vehicle, route context, traffic, cost, carbon, and SLA risk." />
-      <Panel title="Active Routing Job" icon={Route}>
-        <div className="route-job">
-          <div><span>Package</span><b>{shipmentId}</b></div>
-          <div><span>Current leg</span><b>{shipmentId === "SHP-1028" ? "HUB-JKT -> HUB-BKS" : `${shipment.origin_hub} -> ${shipment.destination_zone}`}</b></div>
-          <div><span>Assigned vehicle</span><b>{assignedVehicleId}</b></div>
-          <div><span>Current route</span><b>RTE-{shipmentId}-02</b></div>
-        </div>
-        <div className="control-grid">
-          <select value={shipmentId} onChange={(e) => setShipmentId(e.target.value)}>{shared.shipments.map((s) => <option key={s.shipment_id}>{s.shipment_id}</option>)}</select>
-          <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-            <option value="balanced_ai">Balanced AI</option>
-            <option value="fastest">Time Priority</option>
-            <option value="greenest">Green Priority</option>
-            <option value="sla_priority">SLA Priority</option>
-          </select>
-          <Button onClick={run} busy={busy}>Evaluate Active Job</Button>
-        </div>
+      <Header title="Route Planning" description="Monitor active routing jobs, inspect current operating context, evaluate route trade-offs, and activate operational decisions." />
+      <Panel title="Routing Jobs Table" icon={Route}>
+        <EntityTable columns={[
+          { key: "id", label: "Job" },
+          { key: "shipment_id", label: "Package" },
+          { key: "job_type", label: "Type" },
+          { key: "corridor", label: "Corridor" },
+          { key: "vehicle_id", label: "Vehicle" },
+          { key: "driver_name", label: "Driver" },
+          { key: "sla_probability", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{formatPercent(row.sla_probability, 1)}</StatusPill> },
+          { key: "predicted_delay_min", label: "Delay", render: (row) => `${row.predicted_delay_min} min` },
+          { key: "route_id", label: "Route" }
+        ]} rows={jobs} selectedId={selected?.id} onSelect={(row) => { setSelectedJobId(row.id); setResult(null); }} />
       </Panel>
+      {selected && (
+        <Panel title={`${selected.id} Routing Job Digital Twin`} icon={Map}>
+          <div className="entity-hero">
+            <div><b>{selected.id}</b><span>{selected.corridor}</span></div>
+            <StatusPill tone={riskTone(selected.risk_level)}>{selected.risk_level}</StatusPill>
+            <span>{selected.vehicle_id} / {selected.driver_name}</span>
+            <span>{selected.route_id}</span>
+          </div>
+          <div className="control-grid">
+            <select value={preset} onChange={(e) => setPreset(e.target.value)}>
+              <option value="balanced_ai">Balanced AI</option>
+              <option value="fastest">Time Priority</option>
+              <option value="greenest">Green Priority</option>
+              <option value="sla_priority">SLA Priority</option>
+            </select>
+            <Button onClick={run} busy={busy}>Evaluate Routes</Button>
+          </div>
+        </Panel>
+      )}
       <div className="two-col map-first">
-        <Panel title="Geographic Route Map" icon={Map}><RouteMap candidates={candidates} /></Panel>
-        <Panel title="Calculation Methodology" icon={Database}>
+        <Panel title="Route Map" icon={Map}><RouteMap candidates={candidates} /></Panel>
+        <Panel title="Methodology" icon={Database}>
           <div className="method-list">
-            <p><b>Road network:</b> Haversine demo matrix fallback</p>
-            <p><b>Traffic context:</b> Jakarta prototype traffic model</p>
-            <p><b>Vehicle:</b> {assignedVehicleId}</p>
-            <p><b>Fuel / energy:</b> Demo price snapshot</p>
-            <p><b>Carbon factor:</b> CF-DEMO-2026</p>
+            <p><b>Road network:</b> Haversine demo matrix fallback, not live road routing.</p>
+            <p><b>Traffic:</b> Jakarta Prototype Traffic Model.</p>
+            <p><b>Cost:</b> fuel/energy demo price snapshots.</p>
+            <p><b>Carbon:</b> CF-DEMO-2026 deterministic baseline.</p>
           </div>
         </Panel>
       </div>
       {result && (
-        <>
-          <Panel title="Route Trade-Off Explorer" icon={BarChart3}>
-            <EntityTable columns={[
-              { key: "candidate_name", label: "Candidate" },
-              { key: "distance", label: "Distance", render: (row) => `${row.metrics.distance_km} km` },
-              { key: "time", label: "Time", render: (row) => `${row.metrics.estimated_time_min} min` },
-              { key: "fuel", label: "Fuel", render: (row) => `${row.metrics.fuel_liter} L` },
-              { key: "co2", label: "CO2e", render: (row) => `${row.metrics.co2_kg} kg` },
-              { key: "sla", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.metrics.sla_risk > .5 ? "High" : "Low")}>{formatPercent(row.metrics.sla_risk)}</StatusPill> },
-              { key: "score", label: "Score", render: (row) => row.metrics.objective_score }
-            ]} rows={candidates.map((candidate) => ({ ...candidate, id: candidate.candidate_name }))} />
-          </Panel>
-          <div className="viz-grid">
-            <BarChart title="Distance" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.distance_km }))} unit="km" color="#2563eb" />
-            <BarChart title="Travel Time" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.estimated_time_min }))} unit="m" color="#f59e0b" />
-            <BarChart title="CO2e" data={candidates.map((c) => ({ label: c.candidate_name, value: c.metrics.co2_kg }))} unit="kg" color="#0f9d8a" />
-          </div>
-        </>
+        <Panel title="Candidate Trade-Off Table" icon={BarChart3}>
+          <EntityTable columns={[
+            { key: "candidate_name", label: "Candidate" },
+            { key: "distance", label: "Distance", render: (row) => `${row.metrics.distance_km.toFixed(1)} km` },
+            { key: "time", label: "Time", render: (row) => `${row.metrics.estimated_time_min.toFixed(0)} min` },
+            { key: "fuel", label: "Fuel", render: (row) => `${row.metrics.fuel_liter.toFixed(2)} L` },
+            { key: "co2", label: "CO2e", render: (row) => `${row.metrics.co2_kg.toFixed(2)} kg` },
+            { key: "sla", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.metrics.sla_risk > .5 ? "High" : "Low")}>{formatPercent(row.metrics.sla_risk, 1)}</StatusPill> },
+            { key: "score", label: "Score", render: (row) => row.metrics.objective_score }
+          ]} rows={candidates.map((candidate) => ({ ...candidate, id: candidate.candidate_name }))} />
+        </Panel>
       )}
     </>
   );
@@ -1053,10 +1274,11 @@ function DataModels() {
             <DonutChart title="Model Availability" data={modelSeries.length ? modelSeries : [{ label: "loading", value: 1 }]} />
             <DonutChart title="Provider Source Mix" data={providerSeries.length ? providerSeries : [{ label: "demo", value: 1 }]} />
             <HorizontalBars title="Training Dataset Readiness" data={Object.entries(training.data || {}).map(([key, value]) => ({ label: key, value: safeNumber(value.rows || value.row_count || value.count || 1) }))} color="#7c3aed" />
-            <HorizontalBars title="Data Source Count" data={Object.entries(dataSources.data || {}).map(([key, value]) => ({ label: key, value: Array.isArray(value) ? value.length : 1 }))} color="#0f9d8a" />
+            <HorizontalBars title="Provider Freshness" data={(providers.data || []).map((p) => ({ label: p.domain, value: p.available ? 100 : 0 }))} unit="%" color="#0f9d8a" />
           </div>
           <Panel title="Operational Assumptions Registry" icon={Database}>
             <div className="assumption-grid">
+              <article><b>Route / TMS provider</b><span>DemoRouteProvider / Haversine demo matrix fallback</span></article>
               <article><b>Traffic model</b><span>Jakarta Prototype Traffic Profile / synthetic multipliers</span></article>
               <article><b>Fuel prices</b><span>Diesel Rp6,800/L, gasoline Rp10,000/L</span></article>
               <article><b>Energy price</b><span>EV charging Rp1,444/kWh</span></article>
@@ -1130,6 +1352,7 @@ function App() {
       <main>
         <Status {...bootstrap}>
           {page === "Overview" && <Overview shared={shared} />}
+          {page === "Live Operations" && <LiveOperations shared={shared} />}
           {page === "Package Tracking" && <PackageTracking shared={shared} onOpenPackage={(id) => setPage("Package Reports")} />}
           {page === "Package Reports" && <PackageReports shared={shared} />}
           {page === "Hub Operations" && <HubOperations shared={shared} />}
