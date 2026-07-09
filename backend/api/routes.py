@@ -74,6 +74,38 @@ def loading_history(shipment_id: str):
     return core.loading_history(shipment_id)
 
 
+@router.get("/operational-signals")
+def operational_signals(entity_id: str | None = None, signal_type: str | None = None):
+    return core.list_operational_signals(entity_id=entity_id, signal_type=signal_type)
+
+
+@router.post("/vision/package-damage")
+async def package_damage_signal(shipment_id: str, file: UploadFile | None = File(None)):
+    content = await file.read() if file else None
+    filename = file.filename if file and file.filename else "demo-damage.jpg"
+    return handle(core.process_package_damage_signal, shipment_id, filename, content)
+
+
+@router.post("/vision/hub-occupancy/{hub_id}")
+def hub_occupancy_signal(hub_id: str, area: str = "sorting", observed_packages: int | None = None):
+    return handle(core.process_hub_occupancy_signal, hub_id, area, observed_packages)
+
+
+@router.post("/forecast/hub-overflow/{hub_id}")
+def hub_overflow_signal(hub_id: str, horizon_minutes: int = 90):
+    return handle(core.forecast_hub_overflow_signal, hub_id, horizon_minutes)
+
+
+@router.post("/vision/loading-validation")
+def loading_validation_signal(shipment_id: str, observed_vehicle_id: str | None = None):
+    return handle(core.process_wrong_loading_signal, shipment_id, observed_vehicle_id)
+
+
+@router.post("/vision/demo-scenario")
+def visual_demo_scenario():
+    return core.run_visual_demo_scenario()
+
+
 @router.post("/risk/predict/{shipment_id}")
 def risk_predict(shipment_id: str):
     return handle(core.predict_risk, shipment_id)

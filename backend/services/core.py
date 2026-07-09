@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -127,6 +128,329 @@ def loading_history(shipment_id: str) -> list[dict]:
     return rows
 
 
+
+
+def _severity_from_score(score: float) -> str:
+    if score >= 0.82:
+        return "Critical"
+    if score >= 0.62:
+        return "Warning"
+    if score >= 0.38:
+        return "Watch"
+    return "Info"
+
+
+def _status_from_severity(severity: str) -> str:
+    return "ACTION_REQUIRED" if severity in {"Critical", "Warning"} else "OBSERVED"
+
+
+def _signal_row(row: dict) -> dict:
+    item = dict(row)
+    item["normalized_payload"] = repo.jload(item.pop("normalized_payload_json"), {})
+    item["state_change"] = repo.jload(item.pop("state_change_json"), {})
+    return item
+
+
+def _latest_signal(signal_type: str, entity_id: str) -> dict | None:
+    row = repo.row(
+        "SELECT * FROM operational_signals WHERE signal_type=? AND entity_id=? ORDER BY created_at DESC LIMIT 1",
+        (signal_type, entity_id),
+    )
+    return _signal_row(row) if row else None
+
+
+def list_operational_signals(entity_id: str | None = None, signal_type: str | None = None, limit: int = 80) -> list[dict]:
+    clauses = []
+    params: list[Any] = []
+    if entity_id:
+        clauses.append("(entity_id=? OR shipment_id=? OR hub_id=?)")
+        params.extend([entity_id, entity_id, entity_id])
+    if signal_type:
+        clauses.append("signal_type=?")
+        params.append(signal_type)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = repo.rows(f"SELECT * FROM operational_signals{where} ORDER BY created_at DESC LIMIT ?", tuple(params + [limit]))
+    return [_signal_row(row) for row in rows]
+
+
+def _persist_signal(
+    signal_type: str,
+    source_module: str,
+    entity_type: str,
+    entity_id: str,
+    severity: str,
+    confidence: float,
+    payload: dict,
+    state_change: dict,
+    model_source: str,
+    shipment_id: str | None = None,
+    hub_id: str | None = None,
+) -> dict:
+    payload_hash = hashlib.sha1(repo.jdump(payload).encode("utf-8")).hexdigest()[:10].upper()
+    signal_id = f"SIG-{signal_type}-{entity_id}-{payload_hash}".replace(" ", "-")
+    repo.execute(
+        "INSERT OR REPLACE INTO operational_signals(signal_id,signal_type,source_module,entity_type,entity_id,shipment_id,hub_id,severity,confidence,status,normalized_payload_json,state_change_json,model_source,is_demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            signal_id,
+            signal_type,
+            source_module,
+            entity_type,
+            entity_id,
+            shipment_id,
+            hub_id,
+            severity,
+            round(confidence, 3),
+            _status_from_severity(severity),
+            repo.jdump(payload),
+            repo.jdump(state_change),
+            model_source,
+        ),
+    )
+    return _latest_signal(signal_type, entity_id) or {"signal_id": signal_id}
+
+
+def _create_signal_intervention(
+    signal: dict,
+    intervention_type: str,
+    action: str,
+    reason: str,
+    primary_factor: str,
+    expected_after: dict,
+) -> dict | None:
+    if signal["severity"] not in {"Critical", "Warning"}:
+        return None
+    intervention_id = f"INT-{signal['signal_id']}-{intervention_type}".replace(" ", "-")
+    before = signal.get("state_change", {}).get("before", {})
+    impact = {
+        "expected_delay_change_min": expected_after.get("expected_delay_change_min", 0),
+        "actual_reforecast_delay_change_min": expected_after.get("expected_delay_change_min", 0),
+        "expected_sla_change_pp": expected_after.get("expected_sla_change_pp", 0),
+        "actual_reforecast_sla_change_pp": expected_after.get("expected_sla_change_pp", 0),
+        "expected_co2_change_kg": 0,
+        "actual_reforecast_co2_change_kg": 0,
+        "status": "PENDING_RESULT",
+        "evidence": signal,
+    }
+    now = now_iso()
+    repo.execute(
+        "INSERT OR REPLACE INTO operational_interventions(intervention_id,shipment_id,journey_id,journey_leg_id,hub_id,vehicle_id,intervention_type,trigger_type,trigger_event_id,severity,status,recommended_action,recommended_entity_id,reason,primary_factor,evidence_json,before_state_json,expected_after_state_json,actual_after_state_json,decision_policy,accepted_at,executed_at,completed_at,impact_json,is_simulated,scenario_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            intervention_id,
+            signal.get("shipment_id"),
+            f"JRN-{signal['shipment_id']}" if signal.get("shipment_id") else None,
+            None,
+            signal.get("hub_id"),
+            signal.get("normalized_payload", {}).get("observed_vehicle_id"),
+            intervention_type,
+            signal["signal_type"],
+            signal["signal_id"],
+            signal["severity"],
+            "PENDING",
+            action,
+            signal["entity_id"],
+            reason,
+            primary_factor,
+            repo.jdump(signal),
+            repo.jdump(before),
+            repo.jdump(expected_after),
+            None,
+            "VISUAL_SIGNAL_DEMO_POLICY_V1",
+            None,
+            None,
+            None,
+            repo.jdump(impact),
+            1,
+            "VISUAL_SIGNAL_INTEGRATION",
+        ),
+    )
+    _persist_impact(intervention_id, signal.get("shipment_id") or signal["entity_id"], impact)
+    return get_intervention(intervention_id)
+
+
+def process_package_damage_signal(shipment_id: str, filename: str = "demo-damage.jpg", content: bytes | None = None) -> dict:
+    shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (shipment_id,))
+    if not shipment:
+        raise ValueError(f"Unknown shipment {shipment_id}")
+    raw = content or f"{shipment_id}:damage-demo".encode("utf-8")
+    if content:
+        validate_image(filename, content)
+    digest = hashlib.sha1(raw).hexdigest()
+    damage_probability = 0.72 if shipment_id == "SHP-1028" else 0.38 + (int(digest[:2], 16) / 255) * 0.28
+    severity = _severity_from_score(damage_probability)
+    before_score = float(shipment.get("loading_compliance_score") or 86)
+    after_score = max(40, round(before_score - damage_probability * 18, 1))
+    repo.execute("UPDATE shipments SET loading_compliance_score=? WHERE shipment_id=?", (after_score, shipment_id))
+    payload = {
+        "risk_label": "potential_damage_risk",
+        "detections": [
+            {"class_name": "crushed_box", "confidence": round(damage_probability, 2), "bbox": [0.18, 0.21, 0.47, 0.58]},
+            {"class_name": "torn_corner", "confidence": round(max(damage_probability - 0.16, 0.12), 2), "bbox": [0.49, 0.32, 0.67, 0.61]},
+        ],
+        "prototype_assumption": "Demo engine estimates potential damage risk only; it does not determine liability.",
+        "image_hash": digest[:16],
+    }
+    state_change = {
+        "before": {"loading_compliance_score": before_score, "quality_hold": False},
+        "after": {"loading_compliance_score": after_score, "quality_hold": severity in {"Critical", "Warning"}},
+        "affected_engines": ["Delay prediction", "SLA risk prediction", "Decision Engine", "Package Digital Twin"],
+    }
+    signal = _persist_signal("PACKAGE_DAMAGE_RISK_DETECTED", "PackageDamagePrototypeEngine", "SHIPMENT", shipment_id, severity, damage_probability, payload, state_change, "PrototypeDamageSignalEngine:v1", shipment_id=shipment_id, hub_id=shipment.get("origin_hub"))
+    risk = predict_risk(shipment_id)
+    intervention = _create_signal_intervention(
+        signal,
+        "PACKAGE_INSPECTION",
+        "Hold package for visual inspection before dispatch.",
+        "Potential package damage risk was detected and lowered the package quality context.",
+        "Visual package condition risk",
+        {"quality_hold": True, "expected_delay_change_min": 8, "expected_sla_change_pp": 3.0, "inspection_policy": "Manual inspection clears or confirms hold."},
+    )
+    return {"signal": signal, "risk": risk, "intervention": intervention}
+
+
+def process_hub_occupancy_signal(hub_id: str, area: str = "sorting", observed_packages: int | None = None, observed_workers: int = 6) -> dict:
+    hub = repo.row("SELECT * FROM hubs WHERE hub_id=?", (hub_id,))
+    if not hub:
+        raise ValueError(f"Unknown hub {hub_id}")
+    latest = repo.row("SELECT * FROM hub_events WHERE hub_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (hub_id,))
+    base_queue = int(latest.get("queue_size") if latest else 12)
+    packages = observed_packages if observed_packages is not None else base_queue + (24 if hub_id == "HUB-JKT" else 12)
+    occupancy_ratio = min(1.0, packages / 52)
+    severity = _severity_from_score(occupancy_ratio)
+    dwell = round(float(hub["normal_dwell_time_min"]) + occupancy_ratio * 42, 1)
+    shipment_id = latest.get("shipment_id") if latest else "SHP-1028"
+    repo.execute(
+        "INSERT INTO hub_events(hub_id,shipment_id,arrival_rate_per_hour,departure_rate_per_hour,queue_size,average_dwell_time_min,processing_rate_per_hour,sorting_time_min,loading_time_min,unloading_time_min,workforce_capacity_index,current_delayed_shipments,current_total_shipments,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            hub_id,
+            shipment_id,
+            28 + int(occupancy_ratio * 18),
+            max(12, 30 - int(occupancy_ratio * 9)),
+            packages,
+            dwell,
+            max(18, 34 - int(occupancy_ratio * 10)),
+            round(24 + occupancy_ratio * 34, 1),
+            round(18 + occupancy_ratio * 18, 1),
+            round(16 + occupancy_ratio * 14, 1),
+            round(max(0.55, 1 - occupancy_ratio * 0.32), 2),
+            int(4 + occupancy_ratio * 28),
+            int(78 + occupancy_ratio * 30),
+            now_iso(),
+        ),
+    )
+    payload = {
+        "area": area,
+        "observed_packages": packages,
+        "observed_workers": observed_workers,
+        "occupancy_ratio": round(occupancy_ratio, 3),
+        "prototype_assumption": "Visual density is a supplemental congestion signal, not a WMS replacement.",
+    }
+    state_change = {
+        "before": {"queue_size": base_queue, "average_dwell_time_min": latest.get("average_dwell_time_min") if latest else None},
+        "after": {"queue_size": packages, "average_dwell_time_min": dwell},
+        "affected_engines": ["Hub congestion analysis", "Delay prediction", "Decision Engine", "Hub Operations"],
+    }
+    signal = _persist_signal("HUB_VISUAL_OCCUPANCY_DETECTED", "HubOccupancyPrototypeEngine", "HUB", hub_id, severity, occupancy_ratio, payload, state_change, "PrototypeHubOccupancyEngine:v1", shipment_id=shipment_id, hub_id=hub_id)
+    analysis = analyze_hub_service(hub_id)
+    intervention = _create_signal_intervention(
+        signal,
+        "HUB_CONGESTION_REVIEW",
+        "Open overflow lane and rebalance sorting capacity.",
+        "Visual occupancy increased queue and dwell context for the hub digital twin.",
+        "Visual hub density",
+        {"expected_delay_change_min": -12, "expected_sla_change_pp": -4.5, "target_queue_size": max(8, packages - 14)},
+    )
+    return {"signal": signal, "hub_analysis": analysis, "intervention": intervention}
+
+
+def forecast_hub_overflow_signal(hub_id: str, horizon_minutes: int = 90) -> dict:
+    hub = repo.row("SELECT * FROM hubs WHERE hub_id=?", (hub_id,))
+    latest = repo.row("SELECT * FROM hub_events WHERE hub_id=? ORDER BY captured_at DESC, id DESC LIMIT 1", (hub_id,))
+    if not hub or not latest:
+        raise ValueError(f"No hub context found for {hub_id}")
+    growth = max(0, float(latest["arrival_rate_per_hour"]) - float(latest["departure_rate_per_hour"]))
+    expected_queue = int(float(latest["queue_size"]) + growth * horizon_minutes / 60)
+    pressure = min(1.0, expected_queue / 58 + max(0, float(latest["average_dwell_time_min"]) - float(hub["normal_dwell_time_min"])) / 120)
+    severity = _severity_from_score(pressure)
+    forecast_id = f"OVF-{hub_id}-{horizon_minutes}-{expected_queue}"
+    evidence = {
+        "arrival_rate_per_hour": latest["arrival_rate_per_hour"],
+        "departure_rate_per_hour": latest["departure_rate_per_hour"],
+        "current_queue_size": latest["queue_size"],
+        "expected_queue_size": expected_queue,
+        "horizon_minutes": horizon_minutes,
+    }
+    repo.execute(
+        "INSERT OR REPLACE INTO hub_overflow_forecasts(forecast_id,hub_id,horizon_minutes,overflow_probability,expected_queue_size,risk_level,evidence_json,model_source) VALUES(?,?,?,?,?,?,?,?)",
+        (forecast_id, hub_id, horizon_minutes, round(pressure, 3), expected_queue, severity, repo.jdump(evidence), "PrototypeHubOverflowForecastEngine:v1"),
+    )
+    payload = {**evidence, "overflow_probability": round(pressure, 3), "prototype_assumption": "Deterministic queue growth forecast for competition demo."}
+    state_change = {
+        "before": {"queue_size": latest["queue_size"], "risk_level": "Observed"},
+        "after": {"expected_queue_size": expected_queue, "overflow_probability": round(pressure, 3), "risk_level": severity},
+        "affected_engines": ["Hub congestion analysis", "Decision Engine", "Analytics"],
+    }
+    signal = _persist_signal("HUB_OVERFLOW_RISK_FORECAST", "HubOverflowPrototypeForecastEngine", "HUB", hub_id, severity, pressure, payload, state_change, "PrototypeHubOverflowForecastEngine:v1", shipment_id=latest.get("shipment_id"), hub_id=hub_id)
+    intervention = _create_signal_intervention(
+        signal,
+        "HUB_OVERFLOW_REVIEW",
+        "Pre-stage outbound capacity and slow non-priority inbound release.",
+        "Forecasted queue growth indicates possible hub overflow within the demo horizon.",
+        "Projected hub queue growth",
+        {"expected_delay_change_min": -15, "expected_sla_change_pp": -5.0, "horizon_minutes": horizon_minutes},
+    )
+    return {"forecast_id": forecast_id, "signal": signal, "intervention": intervention}
+
+
+def process_wrong_loading_signal(shipment_id: str, observed_vehicle_id: str | None = None) -> dict:
+    shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (shipment_id,))
+    if not shipment:
+        raise ValueError(f"Unknown shipment {shipment_id}")
+    planned_vehicle = shipment.get("vehicle_id")
+    observed = observed_vehicle_id or ("VAN-044" if planned_vehicle != "VAN-044" else "MTR-002")
+    mismatch = observed != planned_vehicle
+    confidence = 0.91 if mismatch else 0.18
+    severity = "Critical" if mismatch else "Info"
+    before_score = float(shipment.get("loading_compliance_score") or 86)
+    after_score = max(35, before_score - 24) if mismatch else before_score
+    repo.execute("UPDATE shipments SET loading_compliance_score=? WHERE shipment_id=?", (after_score, shipment_id))
+    payload = {
+        "planned_vehicle_id": planned_vehicle,
+        "observed_vehicle_id": observed,
+        "mismatch": mismatch,
+        "prototype_assumption": "Destination comes from shipment data; vision only validates observed loading context.",
+    }
+    state_change = {
+        "before": {"vehicle_id": planned_vehicle, "loading_compliance_score": before_score},
+        "after": {"vehicle_id": planned_vehicle, "observed_vehicle_id": observed, "loading_compliance_score": after_score, "dispatch_blocked": mismatch},
+        "affected_engines": ["Package Digital Twin", "Delay prediction", "Decision Engine", "Route Planning"],
+    }
+    signal = _persist_signal("WRONG_PACKAGE_LOADING_DETECTED", "VisionLoadingValidationEngine", "SHIPMENT", shipment_id, severity, confidence, payload, state_change, "PrototypeLoadingValidationEngine:v1", shipment_id=shipment_id, hub_id=shipment.get("origin_hub"))
+    risk = predict_risk(shipment_id)
+    intervention = _create_signal_intervention(
+        signal,
+        "PACKAGE_LOADING_CORRECTION",
+        f"Remove {shipment_id} from {observed} and reload to planned vehicle {planned_vehicle}.",
+        "Observed loading assignment did not match the shipment plan.",
+        "Vehicle assignment mismatch",
+        {"dispatch_blocked": True, "expected_delay_change_min": 6, "expected_sla_change_pp": 6.0, "planned_vehicle_id": planned_vehicle},
+    )
+    return {"signal": signal, "risk": risk, "intervention": intervention}
+
+
+def run_visual_demo_scenario() -> dict:
+    damage = process_package_damage_signal("SHP-1028")
+    occupancy = process_hub_occupancy_signal("HUB-JKT")
+    overflow = forecast_hub_overflow_signal("HUB-JKT")
+    wrong_load = process_wrong_loading_signal("SHP-1028", "VAN-044")
+    return {
+        "package_damage": damage,
+        "hub_occupancy": occupancy,
+        "hub_overflow": overflow,
+        "wrong_loading": wrong_load,
+        "recent_signals": list_operational_signals(limit=12),
+    }
+
+
 def carbon_estimate(payload: dict) -> dict:
     vehicle = repo.row("SELECT * FROM vehicles WHERE vehicle_id=?", (payload["vehicle_id"],))
     shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (payload["shipment_id"],))
@@ -233,7 +557,7 @@ def simulation_state() -> dict:
     events = repo.rows("SELECT * FROM simulation_events ORDER BY step")
     for e in events:
         e["payload"] = repo.jload(e.pop("payload_json"), {})
-    return {"state": state, "events": events, "latest_risk": risk_history(state["active_shipment_id"])["sla"][:1], "alerts": alerts()[:8]}
+    return {"state": state, "events": events, "latest_risk": risk_history(state["active_shipment_id"])["sla"][:1], "alerts": alerts()[:8], "visual_signals": list_operational_signals(limit=8)}
 
 
 def simulation_next() -> dict:
@@ -287,6 +611,13 @@ def simulation_next() -> dict:
             "INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)",
             ("SHP-1028", payload.get("vehicle_id", "VAN-021"), payload["lat"], payload["lon"], payload["speed_kmh"], payload["route_deviation_count"], ts),
         )
+    if event_type == "HUB_ARRIVED":
+        process_package_damage_signal("SHP-1028")
+    if event_type == "HUB_UPDATE":
+        process_hub_occupancy_signal(payload.get("hub_id", "HUB-JKT"))
+        forecast_hub_overflow_signal(payload.get("hub_id", "HUB-JKT"))
+    if event_type == "LAST_MILE_STARTED":
+        process_wrong_loading_signal("SHP-1028", payload.get("vehicle_id", "MTR-002"))
     if event_type == "DELIVERED":
         repo.execute("UPDATE shipments SET status='Delivered' WHERE shipment_id='SHP-1028'")
     repo.execute("UPDATE simulation_events SET processed=1 WHERE event_id=?", (event["event_id"],))
@@ -428,6 +759,8 @@ def package_journey_view(shipment_id: str) -> dict:
             "evidence": repo.jload(latest_recommendation["evidence_json"], {}),
             "created_at": latest_recommendation["created_at"],
         }
+    visual_signals = list_operational_signals(entity_id=shipment_id, limit=20)
+    hub_visual_signals = list_operational_signals(entity_id=snap["hub"]["hub_id"], limit=20)
     shipment_alerts = [a for a in alerts() if a["entity_id"] in {shipment_id, shipment.get("origin_hub")}]
     carbon_total = round(sum(c["co2_kg"] for c in repo.rows("SELECT co2_kg FROM carbon_estimates WHERE shipment_id=?", (shipment_id,))), 3)
     if not carbon_total and route_rows:
@@ -474,7 +807,19 @@ def package_journey_view(shipment_id: str) -> dict:
             "current_stage": stage,
             "future_stages": [key for i, (key, _label, _loc) in enumerate(JOURNEY_STAGES) if i > stage_index],
         },
-        "timeline": _timeline_from_events(shipment_id),
+        "timeline": _timeline_from_events(shipment_id) + [
+            {
+                "event_id": signal["signal_id"],
+                "event_type": signal["signal_type"],
+                "event_at": signal["created_at"],
+                "title": signal["signal_type"].replace("_", " ").title(),
+                "description": signal["state_change"].get("affected_engines", ["Operational state"])[0] + " updated from visual or predictive signal.",
+                "severity": signal["severity"],
+                "processed": True,
+                "payload": signal["normalized_payload"],
+            }
+            for signal in (visual_signals + hub_visual_signals)[:8]
+        ],
         "current_hub_visit": {
             "hub_id": snap["hub"]["hub_id"],
             "dwell_time_min": snap["hub_event"]["average_dwell_time_min"],
@@ -483,6 +828,15 @@ def package_journey_view(shipment_id: str) -> dict:
             "sorting_time_min": snap["hub_event"]["sorting_time_min"],
             "loading_time_min": snap["hub_event"]["loading_time_min"],
             "unloading_time_min": snap["hub_event"]["unloading_time_min"],
+            "visual_signals": hub_visual_signals[:5],
+        },
+        "visual_intelligence": {
+            "package_signals": visual_signals[:8],
+            "hub_signals": hub_visual_signals[:8],
+            "latest_damage": _latest_signal("PACKAGE_DAMAGE_RISK_DETECTED", shipment_id),
+            "latest_wrong_loading": _latest_signal("WRONG_PACKAGE_LOADING_DETECTED", shipment_id),
+            "latest_hub_occupancy": _latest_signal("HUB_VISUAL_OCCUPANCY_DETECTED", snap["hub"]["hub_id"]),
+            "latest_overflow": _latest_signal("HUB_OVERFLOW_RISK_FORECAST", snap["hub"]["hub_id"]),
         },
         "risk_history": {
             "delay": [_prediction_row(row, "delay") for row in risk_history_rows["delay"]],
@@ -759,6 +1113,13 @@ def _digital_twin_sections(view: dict) -> dict:
         },
         "active_interventions": list_interventions(shipment_id=view["shipment_id"]),
         "latest_decision": list_interventions(shipment_id=view["shipment_id"])[0] if list_interventions(shipment_id=view["shipment_id"]) else None,
+        "quality_context": {
+            "loading_compliance_score": shipment.get("loading_compliance_score"),
+            "latest_damage_signal": view.get("visual_intelligence", {}).get("latest_damage"),
+            "latest_wrong_loading_signal": view.get("visual_intelligence", {}).get("latest_wrong_loading"),
+            "active_quality_hold": any(signal.get("severity") in {"Critical", "Warning"} for signal in view.get("visual_intelligence", {}).get("package_signals", [])),
+        },
+        "visual_intelligence": view.get("visual_intelligence", {}),
         "timeline": view["timeline"],
         "risk_history": view["risk_history"],
         "journey_progress": view["journey_progress"],
@@ -794,6 +1155,7 @@ def analytics_summary() -> dict:
             "sla_risk_change": round(current["metrics"]["sla_risk"] - best["metrics"]["sla_risk"], 3),
             "baseline": "Current seeded route versus selected recommendation.",
         }
+    visual_signals = list_operational_signals(limit=200)
     return {
         "active_shipments": len([s for s in shipments if s["status"] == "Active"]),
         "risk_distribution": {level: len([r for r in latest if r["risk_level"] == level]) for level in ["Low", "Medium", "High", "Critical"]},
@@ -802,9 +1164,26 @@ def analytics_summary() -> dict:
         "daily_carbon_estimate_kg": round(sum(c["metrics"]["co2_kg"] for c in candidates), 2) if candidates else 0,
         "fleet_utilization": fleet_analysis(),
         "route_impact": impact,
+        "visual_signal_counts": count_by_signal_type(visual_signals),
+        "visual_signal_severity": count_by_signal_severity(visual_signals),
+        "latest_visual_signals": visual_signals[:8],
         "alerts": alerts()[:10],
         "assumptions": "Synthetic demo data, Haversine-derived route distances, deterministic carbon baseline.",
     }
+
+
+def count_by_signal_type(signals: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for signal in signals:
+        counts[signal["signal_type"]] = counts.get(signal["signal_type"], 0) + 1
+    return counts
+
+
+def count_by_signal_severity(signals: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for signal in signals:
+        counts[signal["severity"]] = counts.get(signal["severity"], 0) + 1
+    return counts
 
 
 def models() -> list[dict]:
@@ -836,6 +1215,10 @@ def data_sources() -> list[dict]:
         {"domain": "GPS", "category": "Runtime", "current_provider": "DemoGPSProvider", "future_provider": "Driver app / IoT tracker", "status": "SYNTHETIC DEMO"},
         {"domain": "Shipment/ERP", "category": "Master + Operational", "current_provider": "DemoShipmentProvider", "future_provider": "ERP connector", "status": "SYNTHETIC DEMO"},
         {"domain": "Hub", "category": "Runtime", "current_provider": "DemoHubProvider", "future_provider": "WMS / hub scan logs", "status": "SYNTHETIC DEMO"},
+        {"domain": "Visual package condition", "category": "Runtime signal", "current_provider": "PackageDamagePrototypeEngine", "future_provider": "YOLO damage detector + inspection app", "status": "SYNTHETIC DEMO"},
+        {"domain": "Hub visual density", "category": "Runtime signal", "current_provider": "HubOccupancyPrototypeEngine", "future_provider": "CCTV occupancy detector", "status": "SYNTHETIC DEMO"},
+        {"domain": "Hub overflow forecast", "category": "Derived", "current_provider": "PrototypeHubOverflowForecastEngine", "future_provider": "Forecast model over WMS + vision + route arrivals", "status": "DERIVED"},
+        {"domain": "Loading validation", "category": "Runtime signal", "current_provider": "VisionLoadingValidationEngine", "future_provider": "Dock camera + scan reconciliation", "status": "SYNTHETIC DEMO"},
         {"domain": "B.A.L.O.N predictions", "category": "Derived", "current_provider": "Model registry + rule fallback", "future_provider": "Validated model registry", "status": "DERIVED"},
     ]
 
@@ -845,5 +1228,9 @@ def training_data_status() -> dict:
         "delay": {"rows": 420, "target": "delay_minutes", "split_strategy": "prototype random split; group-aware split documented as next hardening", "status": "synthetic prototype target"},
         "sla": {"rows": 420, "target": "sla_breached", "split_strategy": "prototype stratified split; group-aware split documented as next hardening", "status": "synthetic prototype target"},
         "carbon": {"rows": 420, "target": "co2_kg", "split_strategy": "prototype random split", "status": "synthetic formula-derived target"},
+        "package_damage": {"rows": len(list_operational_signals(signal_type="PACKAGE_DAMAGE_RISK_DETECTED")), "target": "potential damage risk", "status": "prototype signal mode; team images required for YOLO training"},
+        "hub_occupancy": {"rows": len(list_operational_signals(signal_type="HUB_VISUAL_OCCUPANCY_DETECTED")), "target": "visual occupancy ratio", "status": "prototype signal mode"},
+        "hub_overflow": {"rows": len(repo.rows("SELECT forecast_id FROM hub_overflow_forecasts")), "target": "overflow probability", "status": "deterministic forecast prototype"},
+        "wrong_loading": {"rows": len(list_operational_signals(signal_type="WRONG_PACKAGE_LOADING_DETECTED")), "target": "planned vs observed loading mismatch", "status": "prototype validation mode"},
         "yolo": {"images": 0, "target": "package/loading classes", "status": "demo mode; team-collected dataset required"},
     }

@@ -19,7 +19,7 @@ def iso(minutes: int = 0) -> str:
 
 def main() -> None:
     initialize_database()
-    for table in ["intervention_impacts","operational_interventions","route_candidates","routes","traffic_snapshots","weather_snapshots","gps_events","hub_events","loading_inspections","delay_predictions","sla_predictions","carbon_estimates","route_recommendations","alerts","maintenance_history","breakdown_history","maintenance_predictions","simulation_events","simulation_state","shipments","vehicles","hubs","model_registry"]:
+    for table in ["intervention_impacts","operational_interventions","hub_overflow_forecasts","operational_signals","route_candidates","routes","traffic_snapshots","weather_snapshots","gps_events","hub_events","loading_inspections","delay_predictions","sla_predictions","carbon_estimates","route_recommendations","alerts","maintenance_history","breakdown_history","maintenance_predictions","simulation_events","simulation_state","shipments","vehicles","hubs","model_registry"]:
         repo.execute(f"DELETE FROM {table}")
     vehicles = [
         ("VAN-021","van",900,4200,"diesel",10.8,"Active",38450,34200,"2026-05-15"),
@@ -71,6 +71,13 @@ def main() -> None:
     ]
     repo.execute_many("INSERT INTO simulation_events(event_id,step,timestamp,event_type,entity_id,payload_json,processed) VALUES(?,?,?,?,?,?,0)", [(e[0],e[1],e[2],e[3],e[4],json.dumps(e[5])) for e in events])
     repo.execute("INSERT OR REPLACE INTO simulation_state(id,current_step,status,current_timestamp,active_shipment_id) VALUES(1,0,'Paused',?,'SHP-1028')", (iso(),))
+    model_rows = [
+        ("PackageDamagePrototypeEngine","v1","prototype_visual_signal","models/package_damage_yolo.pt","team image dataset required",0,json.dumps(["crushed_box","torn_corner","wet_label"]),json.dumps({"mode":"deterministic demo","precision":"not trained"}),"DEMO_MODE","YOLO artifact optional; deterministic fallback active",iso()),
+        ("HubOccupancyPrototypeEngine","v1","prototype_visual_signal","models/hub_occupancy_yolo.pt","hub frame dataset required",0,json.dumps(["package","pallet","worker","occupied_zone"]),json.dumps({"mode":"density heuristic","accuracy":"prototype"}),"DEMO_MODE","Visual density fallback active",iso()),
+        ("PrototypeHubOverflowForecastEngine","v1","prototype_forecast","models/hub_overflow.pkl","synthetic hub event stream",0,json.dumps(["arrival_rate","departure_rate","queue_size","dwell_excess"]),json.dumps({"mode":"queue growth heuristic"}),"DEMO_MODE","Deterministic forecast fallback active",iso()),
+        ("VisionLoadingValidationEngine","v1","prototype_validation","models/loading_validation.pt","dock image + shipment plan",0,json.dumps(["planned_vehicle_id","observed_vehicle_id","package_scan"]),json.dumps({"mode":"plan reconciliation"}),"DEMO_MODE","Shipment-plan validation fallback active",iso()),
+    ]
+    repo.execute_many("INSERT OR REPLACE INTO model_registry(name,version,model_type,file_path,dataset_type,training_rows,feature_names_json,metrics_json,availability,fallback_state,training_timestamp) VALUES(?,?,?,?,?,?,?,?,?,?,?)", model_rows)
     Path("data/demo/demo_manifest.json").write_text(json.dumps({"synthetic": True, "scenario": "SHP-1028"}, indent=2), encoding="utf-8")
     print("Generated synthetic demo data.")
 

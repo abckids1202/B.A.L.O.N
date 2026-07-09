@@ -44,5 +44,11 @@ export const api = {
   providers: () => request("/api/providers/status"),
   snapshot: (shipmentId) => request(`/api/snapshots/${shipmentId}/current`),
   dataSources: () => request("/api/data-sources"),
-  trainingData: () => request("/api/training-data/status")
+  trainingData: () => request("/api/training-data/status"),
+  operationalSignals: (entityId) => request(`/api/operational-signals${entityId ? `?entity_id=${entityId}` : ""}`),
+  packageDamage: (shipmentId) => request(`/api/vision/package-damage?shipment_id=${shipmentId}`, { method: "POST" }),
+  hubOccupancy: (hubId) => request(`/api/vision/hub-occupancy/${hubId}`, { method: "POST" }),
+  hubOverflow: (hubId) => request(`/api/forecast/hub-overflow/${hubId}`, { method: "POST" }),
+  loadingValidation: (shipmentId, observedVehicleId) => request(`/api/vision/loading-validation?shipment_id=${shipmentId}${observedVehicleId ? `&observed_vehicle_id=${observedVehicleId}` : ""}`, { method: "POST" }),
+  visualDemoScenario: () => request("/api/vision/demo-scenario", { method: "POST" })
 };

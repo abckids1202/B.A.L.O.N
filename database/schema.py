@@ -51,6 +51,19 @@ CREATE TABLE IF NOT EXISTS loading_inspections (
   warnings_json TEXT, detections_json TEXT, image_hash TEXT, model_source TEXT, is_demo INTEGER,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS operational_signals (
+  signal_id TEXT PRIMARY KEY, signal_type TEXT NOT NULL, source_module TEXT NOT NULL,
+  entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, shipment_id TEXT, hub_id TEXT,
+  severity TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL,
+  normalized_payload_json TEXT NOT NULL, state_change_json TEXT NOT NULL,
+  model_source TEXT NOT NULL, is_demo INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS hub_overflow_forecasts (
+  forecast_id TEXT PRIMARY KEY, hub_id TEXT NOT NULL, horizon_minutes INTEGER NOT NULL,
+  overflow_probability REAL NOT NULL, expected_queue_size INTEGER NOT NULL,
+  risk_level TEXT NOT NULL, evidence_json TEXT NOT NULL, model_source TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS delay_predictions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, shipment_id TEXT, predicted_delay_minutes REAL,
   model_source TEXT, model_version TEXT, factors_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -120,4 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, severity);
 CREATE INDEX IF NOT EXISTS idx_sim_events_step ON simulation_events(step, processed);
 CREATE INDEX IF NOT EXISTS idx_interventions_status ON operational_interventions(status, severity, created_at);
 CREATE INDEX IF NOT EXISTS idx_interventions_shipment ON operational_interventions(shipment_id, intervention_type);
+CREATE INDEX IF NOT EXISTS idx_operational_signals_entity ON operational_signals(entity_type, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_operational_signals_shipment ON operational_signals(shipment_id, signal_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_operational_signals_hub ON operational_signals(hub_id, signal_type, created_at);
 '''

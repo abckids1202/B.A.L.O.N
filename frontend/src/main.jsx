@@ -396,6 +396,29 @@ function DigitalTwinPanel({ twin }) {
   );
 }
 
+function VisualSignalCard({ signal }) {
+  const payload = signal?.normalized_payload || {};
+  const state = signal?.state_change || {};
+  return (
+    <article className={`signal-card ${riskTone(signal?.severity)}`}>
+      <div>
+        <StatusPill tone={riskTone(signal?.severity)}>{signal?.severity || "Info"}</StatusPill>
+        <b>{String(signal?.signal_type || "Signal").replaceAll("_", " ")}</b>
+      </div>
+      <p>{state.affected_engines?.join(" -> ") || "Operational state updated"}</p>
+      <small>{signal?.model_source || "Prototype engine"} / confidence {formatPercent(signal?.confidence || 0, 0)}</small>
+      {payload.prototype_assumption && <small>{payload.prototype_assumption}</small>}
+    </article>
+  );
+}
+
+function VisualSignalStrip({ signals = [] }) {
+  if (!signals.length) {
+    return <EmptyState>No visual or predictive operational signal has been processed for this context yet.</EmptyState>;
+  }
+  return <div className="signal-grid">{signals.slice(0, 6).map((signal) => <VisualSignalCard key={signal.signal_id} signal={signal} />)}</div>;
+}
+
 function InterventionQueue({ interventions, onAccept, onReject, busy }) {
   if (!interventions?.length) {
     return <EmptyState>No material operational intervention is active for this package.</EmptyState>;
@@ -801,8 +824,21 @@ function PackageTracking({ shared, onOpenPackage }) {
 function HubOperations({ shared }) {
   const hubRisk = useAsync(api.hubRisk, []);
   const [selectedHub, setSelectedHub] = useState(shared.hubs[0]?.hub_id || "HUB-BKS");
+  const [hubBusy, setHubBusy] = useState(false);
+  const [hubRefresh, setHubRefresh] = useState(0);
+  const signals = useAsync(() => api.operationalSignals(selectedHub), [selectedHub, hubRefresh]);
   const selected = (hubRisk.data || []).find((hub) => hub.hub_id === selectedHub) || (hubRisk.data || [])[0];
   const hubPackages = shared.shipments.filter((shipment) => shipment.origin_hub === selectedHub || selectedHub === "HUB-BKS");
+  async function runHubSignal(kind) {
+    setHubBusy(true);
+    try {
+      if (kind === "occupancy") await api.hubOccupancy(selectedHub);
+      if (kind === "overflow") await api.hubOverflow(selectedHub);
+      setHubRefresh((value) => value + 1);
+    } finally {
+      setHubBusy(false);
+    }
+  }
   return (
     <>
       <Header title="Hub Operations" description="Monitor hub queue pressure, dwell deviation, process bottlenecks, incidents, and affected packages." />
@@ -826,12 +862,21 @@ function HubOperations({ shared }) {
               ]} rows={(hubRisk.data || []).map((h) => ({ ...h, id: h.hub_id }))} selectedId={selectedHub} onSelect={(row) => setSelectedHub(row.hub_id)} />
             </Panel>
             <Panel title={`${selectedHub} Process Flow`} icon={Activity}>
+              <div className="control-row">
+                <Button secondary busy={hubBusy} onClick={() => runHubSignal("occupancy")}>Run Occupancy Signal</Button>
+                <Button secondary busy={hubBusy} onClick={() => runHubSignal("overflow")}>Forecast Overflow</Button>
+              </div>
               <div className="process-flow">
                 {["Arrival", "Unloading", "Sorting", "Staging", "Loading", "Departure"].map((step, index) => <span key={step} className={index === 2 && selected?.likely_bottleneck ? "hot" : ""}>{step}</span>)}
               </div>
               <HorizontalBars title="Process Deviation" data={[{ label: "Queue", value: selected?.congestion_score || 0 }, { label: "Dwell", value: Math.max(0, (selected?.congestion_score || 0) - 20) }, { label: "Sorting", value: selected?.likely_bottleneck ? 82 : 18 }, { label: "Loading", value: 34 }]} color="#f59e0b" />
             </Panel>
           </div>
+          <Panel title="Hub Visual and Forecast Signals" icon={Brain}>
+            <Status {...signals}>
+              <VisualSignalStrip signals={signals.data || []} />
+            </Status>
+          </Panel>
           <Panel title="Affected Packages" icon={PackageSearch}>
             <EntityTable columns={[
               { key: "shipment_id", label: "Package" },
@@ -874,6 +919,7 @@ function LiveOperations({ shared }) {
         <Card label="Events processed" value={`${processed}/${total}`} />
         <Card label="Focused package" value={state?.state?.active_shipment_id || "SHP-1028"} />
         <Card label="Alerts" value={state?.alerts?.length || 0} tone="orange" />
+        <Card label="Visual signals" value={state?.visual_signals?.length || 0} tone="green" />
       </div>
       <Panel title="Replay Controls" icon={Play}>
         <div className="control-row">
@@ -907,6 +953,7 @@ function LiveOperations({ shared }) {
         <BarChart title="Active Packages Over Demo Time" data={[{ label: "T0", value: 4 }, { label: "T1", value: 4 }, { label: "T2", value: 3 }, { label: "T3", value: 2 }]} color="#2563eb" />
         <BarChart title="High / Critical SLA Packages" data={[{ label: "T0", value: 1 }, { label: "T1", value: 2 }, { label: "T2", value: 3 }, { label: "T3", value: 1 }]} color="#dc2626" />
         <BarChart title="Interventions Created / Resolved" data={[{ label: "Created", value: Math.max(0, processed - 2) }, { label: "Resolved", value: Math.max(0, processed - 5) }]} color="#7c3aed" />
+        <HorizontalBars title="Latest Signal Confidence" data={(state?.visual_signals || []).slice(0, 5).map((signal) => ({ label: signal.signal_type.replaceAll("_", " ").slice(0, 22), value: Math.round((signal.confidence || 0) * 100) }))} unit="%" color="#0f9d8a" />
       </div>
       <Panel title="Recent Event Stream" icon={ClipboardList}>
         <Timeline events={(state?.events || []).filter((event) => event.processed).slice(-8).map((event) => ({
@@ -1004,6 +1051,21 @@ function PackageReports({ shared }) {
     }
   }
 
+  async function runVisualSignal(kind) {
+    setBusy(true);
+    setError("");
+    try {
+      if (kind === "damage") await api.packageDamage(shipmentId);
+      if (kind === "loading") await api.loadingValidation(shipmentId, "VAN-044");
+      if (kind === "scenario") await api.visualDemoScenario();
+      await loadView(shipmentId);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <Header title="Package Reports" description="Follow a package from origin to buyer with one coherent journey view, risk state, event timeline, hub dwell, route decisions, and carbon context." />
@@ -1026,12 +1088,22 @@ function PackageReports({ shared }) {
       <Panel title="Operational Intervention Queue" icon={AlertTriangle}>
         <InterventionQueue interventions={view?.active_interventions || twin?.active_interventions || []} onAccept={acceptIntervention} onReject={rejectIntervention} busy={busy} />
       </Panel>
+      <Panel title="Visual Operational Signals" icon={Brain}>
+        <div className="control-row">
+          <Button secondary busy={busy} onClick={() => runVisualSignal("damage")}>Run Damage Scan</Button>
+          <Button secondary busy={busy} onClick={() => runVisualSignal("loading")}>Validate Loading</Button>
+          <Button busy={busy} onClick={() => runVisualSignal("scenario")}>Run Four-Signal Demo</Button>
+          <span className="muted">Signals update package quality, hub context, forecasts, and interventions.</span>
+        </div>
+        <VisualSignalStrip signals={[...(view?.visual_intelligence?.package_signals || []), ...(view?.visual_intelligence?.hub_signals || [])]} />
+      </Panel>
       <div className="metrics-grid">
         <Card label="Current stage" value={view?.current_state?.stage_label || shipmentStage(shipment)} detail={view?.current_state?.location_id || shipment.current_status || "journey active"} />
         <Card label="Delay prediction" value={risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} tone={riskTone(risk.sla_level)} />
         <Card label="SLA breach risk" value={risk.sla_probability != null ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} detail={risk.sla_level} tone={riskTone(risk.sla_level)} />
         <Card label="Traffic index" value={current.traffic_index ?? "n/a"} detail="latest provider snapshot" />
         <Card label="Current hub dwell" value={currentHubDwell} detail={currentHubDetail} />
+        <Card label="Quality score" value={shipment.loading_compliance_score ?? "n/a"} detail={twin?.quality_context?.active_quality_hold ? "visual hold active" : "no active hold"} tone={twin?.quality_context?.active_quality_hold ? "red" : "green"} />
       </div>
       <div className="two-col">
         <Panel title="Journey Timeline" icon={ClipboardList}>
@@ -1057,7 +1129,7 @@ function PackageReports({ shared }) {
           { label: "Load", value: hubVisit.loading_time_min || 0 }
         ]} color="#0f9d8a" />
         <HorizontalBars title="Route Decisions" data={(view?.route_decisions || []).slice(0, 5).map((route) => ({ label: route.candidate_name, value: route.metrics?.objective_score || route.metrics?.co2_kg || 0 }))} color="#2563eb" />
-        <Heatmap title="Journey Risk Heatmap" rows={["Origin", "Hub", "Route", "Last mile"]} columns={["Delay", "SLA", "Carbon"]} values={{ "Origin-Delay": 12, "Origin-SLA": 8, "Origin-Carbon": 22, "Hub-Delay": Math.round(current.hub_dwell_excess_min || 0), "Hub-SLA": Math.round((risk.sla_probability || 0) * 100), "Hub-Carbon": 16, "Route-Delay": Math.round((current.traffic_index || 0) * 100), "Route-SLA": Math.round((risk.sla_probability || 0) * 100), "Route-Carbon": 72, "Last mile-Delay": 31, "Last mile-SLA": 35, "Last mile-Carbon": 44 }} />
+        <Heatmap title="Journey Risk Heatmap" rows={["Origin", "Hub", "Route", "Last mile"]} columns={["Delay", "SLA", "Carbon", "Visual"]} values={{ "Origin-Delay": 12, "Origin-SLA": 8, "Origin-Carbon": 22, "Origin-Visual": twin?.quality_context?.active_quality_hold ? 82 : 18, "Hub-Delay": Math.round(current.hub_dwell_excess_min || 0), "Hub-SLA": Math.round((risk.sla_probability || 0) * 100), "Hub-Carbon": 16, "Hub-Visual": Math.round((view?.visual_intelligence?.latest_hub_occupancy?.confidence || 0) * 100), "Route-Delay": Math.round((current.traffic_index || 0) * 100), "Route-SLA": Math.round((risk.sla_probability || 0) * 100), "Route-Carbon": 72, "Route-Visual": view?.visual_intelligence?.latest_wrong_loading ? 91 : 10, "Last mile-Delay": 31, "Last mile-SLA": 35, "Last mile-Carbon": 44, "Last mile-Visual": 24 }} />
         <div className="chart-card narrative">
           <h3>Decision Activity</h3>
           {view?.latest_route_recommendation ? <p>{view.latest_route_recommendation.explanation}</p> : <p>No route intervention has been recorded yet.</p>}
@@ -1096,7 +1168,8 @@ function Analytics() {
               <BarChart title="Delay by Journey Stage" data={[{ label: "Origin", value: 9 }, { label: "Main hub", value: 42 }, { label: "Inter-hub", value: 31 }, { label: "Local hub", value: 18 }, { label: "Last mile", value: 24 }]} unit="m" color="#dc2626" />
               <DonutChart title="Carbon Contribution by Stage (%)" data={[{ label: "Line haul", value: 44 }, { label: "Hub", value: 16 }, { label: "Inter-hub", value: 25 }, { label: "Last mile", value: 15 }]} />
               <HorizontalBars title="Hub Dwell Pressure" data={(hubRisk.data || []).map((h) => ({ label: h.hub_id, value: h.congestion_score }))} unit="/100" color="#f59e0b" />
-              <Heatmap title="Network Exposure Matrix" rows={["HUB-JKT", "HUB-BKS", "HUB-TGR", "LM-ZONE"]} columns={["Queue", "Dwell", "SLA", "Carbon"]} values={{ "HUB-JKT-Queue": 71, "HUB-JKT-Dwell": 84, "HUB-JKT-SLA": 67, "HUB-JKT-Carbon": 25, "HUB-BKS-Queue": 48, "HUB-BKS-Dwell": 56, "HUB-BKS-SLA": 42, "HUB-BKS-Carbon": 18, "HUB-TGR-Queue": 25, "HUB-TGR-Dwell": 22, "HUB-TGR-SLA": 19, "HUB-TGR-Carbon": 15, "LM-ZONE-Queue": 36, "LM-ZONE-Dwell": 30, "LM-ZONE-SLA": 51, "LM-ZONE-Carbon": 69 }} />
+              <Heatmap title="Network Exposure Matrix" rows={["HUB-JKT", "HUB-BKS", "HUB-TGR", "LM-ZONE"]} columns={["Queue", "Dwell", "SLA", "Visual"]} values={{ "HUB-JKT-Queue": 71, "HUB-JKT-Dwell": 84, "HUB-JKT-SLA": 67, "HUB-JKT-Visual": 76, "HUB-BKS-Queue": 48, "HUB-BKS-Dwell": 56, "HUB-BKS-SLA": 42, "HUB-BKS-Visual": 35, "HUB-TGR-Queue": 25, "HUB-TGR-Dwell": 22, "HUB-TGR-SLA": 19, "HUB-TGR-Visual": 14, "LM-ZONE-Queue": 36, "LM-ZONE-Dwell": 30, "LM-ZONE-SLA": 51, "LM-ZONE-Visual": 44 }} />
+              <HorizontalBars title="Operational Signal Mix" data={toSeries(summary.data.visual_signal_counts || {})} color="#0f9d8a" />
               <BarChart title="Forecast Quality Sample" data={[{ label: "On-time", value: 81 }, { label: "Late", value: 14 }, { label: "Reforecasted", value: 39 }, { label: "Improved", value: 22 }]} unit="%" color="#2563eb" />
               <div className="chart-card narrative">
                 <h3>Assumptions</h3>
@@ -1284,6 +1357,7 @@ function DataModels() {
               <article><b>Energy price</b><span>EV charging Rp1,444/kWh</span></article>
               <article><b>Carbon factors</b><span>CF-DEMO-2026, deterministic baseline</span></article>
               <article><b>Hub baselines</b><span>Hub normal dwell profiles from seeded hub table</span></article>
+              <article><b>Visual signals</b><span>Prototype engines write normalized operational signals before updating twins and interventions</span></article>
               <article><b>SLA thresholds</b><span>Low / Medium / High / Critical probability bands</span></article>
             </div>
           </Panel>

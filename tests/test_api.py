@@ -86,3 +86,22 @@ def test_digital_twin_temporal_sections_and_interventions(client):
     assert first["status"] in {"COMPLETED", "PENDING", "ACCEPTED"}
     impact = client.get(f"/api/interventions/{first['intervention_id']}/impact").json()
     assert impact["status"] in {"IMPROVED", "NO_MATERIAL_CHANGE", "PENDING_RESULT"}
+
+
+
+def test_visual_operational_signals_integrate_with_twins(client):
+    damage = client.post("/api/vision/package-damage?shipment_id=SHP-1028").json()
+    assert damage["signal"]["signal_type"] == "PACKAGE_DAMAGE_RISK_DETECTED"
+    assert damage["risk"]["shipment_id"] == "SHP-1028"
+    loading = client.post("/api/vision/loading-validation?shipment_id=SHP-1028&observed_vehicle_id=VAN-044").json()
+    assert loading["signal"]["normalized_payload"]["mismatch"] is True
+    occupancy = client.post("/api/vision/hub-occupancy/HUB-JKT").json()
+    assert occupancy["signal"]["signal_type"] == "HUB_VISUAL_OCCUPANCY_DETECTED"
+    overflow = client.post("/api/forecast/hub-overflow/HUB-JKT").json()
+    assert overflow["signal"]["signal_type"] == "HUB_OVERFLOW_RISK_FORECAST"
+    signals = client.get("/api/operational-signals?entity_id=SHP-1028").json()
+    assert any(signal["signal_type"] == "WRONG_PACKAGE_LOADING_DETECTED" for signal in signals)
+    twin = client.get("/api/packages/SHP-1028/digital-twin").json()
+    assert twin["quality_context"]["latest_damage_signal"]
+    summary = client.get("/api/analytics/summary").json()
+    assert summary["visual_signal_counts"]["PACKAGE_DAMAGE_RISK_DETECTED"] >= 1
