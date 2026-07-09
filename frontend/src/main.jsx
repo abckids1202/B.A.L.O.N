@@ -91,6 +91,18 @@ function shipmentStage(shipment) {
   return "Origin processing";
 }
 
+function AppToolbar({ health, shipments = [], hubs = [] }) {
+  const active = shipments.filter((shipment) => shipment.status === "Active").length;
+  return (
+    <div className="app-toolbar">
+      <span><b>{health?.status || "ok"}</b> API</span>
+      <span><b>{active}</b> active packages</span>
+      <span><b>{hubs.length}</b> hubs</span>
+      <span><b>{health?.timezone || "Asia/Jakarta"}</b> timezone</span>
+    </div>
+  );
+}
+
 function Header({ title, description, action }) {
   return (
     <header className="page-header">
@@ -304,24 +316,49 @@ function JourneyRail({ shipment, risk, snapshot, view }) {
   );
 }
 
-function RouteMap({ candidates = [] }) {
-  const best = candidates[0];
+const cachedRouteGeometry = [
+  { label: "FC-JKT", lat: -6.2088, lon: 106.8456 },
+  { label: "Cawang", lat: -6.242, lon: 106.872 },
+  { label: "HUB-BKS", lat: -6.2383, lon: 106.9756 },
+  { label: "Rawalumbu", lat: -6.2791, lon: 107.0021 },
+  { label: "Bekasi Timur", lat: -6.2477, lon: 107.0188 }
+];
+
+function projectPoint(point, bounds = { minLat: -6.32, maxLat: -6.17, minLon: 106.82, maxLon: 107.08 }) {
+  const x = 46 + ((point.lon - bounds.minLon) / (bounds.maxLon - bounds.minLon)) * 456;
+  const y = 226 - ((point.lat - bounds.minLat) / (bounds.maxLat - bounds.minLat)) * 178;
+  return [Math.max(34, Math.min(506, x)), Math.max(36, Math.min(236, y))];
+}
+
+function pointsToPath(points) {
+  return points.map((point, index) => {
+    const [x, y] = projectPoint(point);
+    return `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function RouteMap({ candidates = [], progress = 62 }) {
+  const best = candidates.find((candidate) => candidate.selected) || candidates[0];
+  const current = candidates.find((candidate) => candidate.candidate_name === "Current");
+  const bestCoords = best?.coordinates?.length ? best.coordinates.map((p) => ({ lat: p.lat, lon: p.lon, label: p.label })) : cachedRouteGeometry;
+  const currentCoords = current?.coordinates?.length ? current.coordinates.map((p) => ({ lat: p.lat, lon: p.lon, label: p.label })) : cachedRouteGeometry;
+  const packagePoint = bestCoords[Math.min(bestCoords.length - 1, Math.max(0, Math.floor((progress / 100) * (bestCoords.length - 1))))];
+  const [px, py] = projectPoint(packagePoint);
   return (
-    <div className="route-map">
-      <svg viewBox="0 0 520 260" role="img" aria-label="Route candidate map">
-        <path d="M52 198 C126 96 208 218 282 116 S407 52 468 148" className="route-path muted" />
-        <path d="M52 198 C136 148 206 174 282 116 S395 95 468 148" className="route-path active" />
-        <path d="M52 198 C104 226 220 96 312 132 S410 196 468 148" className="route-path alternate" />
-        <circle cx="52" cy="198" r="11" className="pin origin" />
-        <circle cx="282" cy="116" r="10" className="pin hub" />
-        <circle cx="468" cy="148" r="12" className="pin destination" />
-        <text x="34" y="226">Origin</text>
-        <text x="260" y="98">Hub</text>
-        <text x="424" y="132">Buyer zone</text>
+    <div className="route-map geo">
+      <svg viewBox="0 0 540 280" role="img" aria-label="Geographic route candidate map">
+        <rect x="18" y="18" width="504" height="244" rx="12" />
+        <path d={pointsToPath(currentCoords)} className="route-path muted" />
+        <path d={pointsToPath(bestCoords)} className="route-path active" />
+        {bestCoords.map((point, index) => {
+          const [x, y] = projectPoint(point);
+          return <g key={`${point.label}-${index}`} className="geo-stop"><circle cx={x} cy={y} r={index === 0 || index === bestCoords.length - 1 ? 11 : 8} /><text x={x + 10} y={y - 8}>{point.label}</text></g>;
+        })}
+        <g className="route-package"><circle cx={px} cy={py} r="10" /><text x={px + 12} y={py + 4}>Package</text></g>
       </svg>
       <div>
-        <b>{best?.candidate_name || "Route candidates"}</b>
-        <span>{best ? `${best.metrics.distance_km} km / ${best.metrics.estimated_time_min} min / ${best.metrics.co2_kg} kg CO2` : "Run an optimization to compare route shapes."}</span>
+        <b>{best?.candidate_name || "Cached demo geometry"}</b>
+        <span>{best ? `${best.metrics.distance_km.toFixed(1)} km / ${best.metrics.estimated_time_min.toFixed(0)} min / ${best.metrics.co2_kg.toFixed(2)} kg CO2e` : "Using deterministic Jakarta-Bekasi cached route geometry until optimization runs."}</span>
       </div>
     </div>
   );
@@ -419,6 +456,36 @@ function VisualSignalStrip({ signals = [] }) {
   return <div className="signal-grid">{signals.slice(0, 6).map((signal) => <VisualSignalCard key={signal.signal_id} signal={signal} />)}</div>;
 }
 
+function SignalStateSummary({ signals = [] }) {
+  if (!signals.length) {
+    return <EmptyState>No visual or predictive operational signal has been processed for this context yet.</EmptyState>;
+  }
+  const groups = Object.values(signals.reduce((acc, signal) => {
+    const key = signal.signal_type;
+    if (!acc[key]) acc[key] = { type: key, count: 0, latest: signal, maxConfidence: 0, severities: {} };
+    acc[key].count += 1;
+    acc[key].latest = signal;
+    acc[key].maxConfidence = Math.max(acc[key].maxConfidence, signal.confidence || 0);
+    acc[key].severities[signal.severity] = (acc[key].severities[signal.severity] || 0) + 1;
+    return acc;
+  }, {}));
+  return (
+    <div className="signal-state-grid">
+      {groups.map((group) => {
+        const topSeverity = Object.entries(group.severities).sort((a, b) => b[1] - a[1])[0]?.[0] || group.latest.severity;
+        return (
+          <article className={`signal-state ${riskTone(topSeverity)}`} key={group.type}>
+            <span>{group.count} event{group.count === 1 ? "" : "s"}</span>
+            <b>{group.type.replaceAll("_", " ")}</b>
+            <strong>{formatPercent(group.maxConfidence, 0)}</strong>
+            <small>{group.latest.state_change?.affected_engines?.slice(0, 2).join(" -> ") || group.latest.model_source}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function InterventionQueue({ interventions, onAccept, onReject, busy }) {
   if (!interventions?.length) {
     return <EmptyState>No material operational intervention is active for this package.</EmptyState>;
@@ -482,59 +549,64 @@ function EntityTable({ columns, rows, selectedId, onSelect }) {
 }
 
 
-function NetworkFlowCanvas({ shipments = [], hubs = [], interventions = [] }) {
+function NetworkFlowCanvas({ shipments = [], hubs = [], interventions = [], mode: controlledMode }) {
+  const [localMode, setLocalMode] = useState("flow");
+  const mode = controlledMode || localMode;
   const active = shipments.filter((s) => s.status === "Active").length;
   const atRisk = shipments.filter((s) => s.priority === "Critical" || s.priority === "Express").length;
   const nodes = [
-    { id: "FC-JKT-01", type: "Fulfillment", x: 70, y: 82, packages: Math.max(8, active), risk: "Low" },
-    { id: "FC-JKT-02", type: "Fulfillment", x: 70, y: 202, packages: 18, risk: "Low" },
-    { id: "HUB-JKT", type: "Main Hub", x: 235, y: 128, packages: 82, risk: "Critical", dwell: 83 },
-    { id: "HUB-TNG", type: "Main Hub", x: 235, y: 230, packages: 28, risk: "Medium", dwell: 29 },
-    { id: "HUB-BKS", type: "Local Hub", x: 398, y: 118, packages: 46, risk: atRisk ? "High" : "Medium", dwell: 37 },
-    { id: "BEKASI LM", type: "Last Mile", x: 560, y: 118, packages: 31, risk: "High" },
-    { id: "DEPOK LM", type: "Last Mile", x: 560, y: 228, packages: 16, risk: "Low" }
+    { id: "FC-JKT", lane: "Origin", x: 44, y: 70, packages: Math.max(8, active * 3), risk: "Low", dwell: 12 },
+    { id: "HUB-JKT", lane: "Main Hub", x: 202, y: 70, packages: 82, risk: "Critical", dwell: 83 },
+    { id: "HUB-TNG", lane: "Main Hub", x: 202, y: 196, packages: 28, risk: "Medium", dwell: 29 },
+    { id: "HUB-BKS", lane: "Local Hub", x: 360, y: 96, packages: 46, risk: atRisk ? "High" : "Medium", dwell: 37 },
+    { id: "BEKASI LM", lane: "Last Mile", x: 518, y: 96, packages: 31, risk: "High", dwell: 18 },
+    { id: "DEPOK LM", lane: "Last Mile", x: 518, y: 210, packages: 16, risk: "Low", dwell: 11 }
   ];
   const edges = [
-    ["FC-JKT-01", "HUB-JKT", 44, "Low"],
-    ["FC-JKT-02", "HUB-JKT", 21, "Medium"],
-    ["FC-JKT-02", "HUB-TNG", 16, "Low"],
-    ["HUB-JKT", "HUB-BKS", 46, interventions.length ? "Intervention" : "High"],
-    ["HUB-BKS", "BEKASI LM", 31, "High"],
-    ["HUB-TNG", "DEPOK LM", 16, "Low"]
+    { from: "FC-JKT", to: "HUB-JKT", flow: 44, sla: 38, traffic: 48, carbon: 32, risk: "Low" },
+    { from: "FC-JKT", to: "HUB-TNG", flow: 16, sla: 18, traffic: 28, carbon: 18, risk: "Low" },
+    { from: "HUB-JKT", to: "HUB-BKS", flow: 46, sla: 82, traffic: 68, carbon: 58, risk: interventions.length ? "Intervention" : "High" },
+    { from: "HUB-BKS", to: "BEKASI LM", flow: 31, sla: 67, traffic: 42, carbon: 24, risk: "High" },
+    { from: "HUB-TNG", to: "DEPOK LM", flow: 16, sla: 21, traffic: 24, carbon: 20, risk: "Low" }
   ];
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const byId = Object.fromEntries(nodes.map((node) => [node.id, node]));
+  const metric = { flow: "flow", sla: "sla", traffic: "traffic", carbon: "carbon" }[mode] || "flow";
+  const label = { flow: "packages/hr", sla: "SLA exposure", traffic: "traffic pressure", carbon: "carbon flow" }[mode] || "packages/hr";
   return (
-    <div className="flow-canvas">
-      <svg viewBox="0 0 640 320" role="img" aria-label="Network operations flow canvas">
-        <defs>
-          <marker id="arrow" markerWidth="8" markerHeight="8" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L6,3 z" fill="#64748b" />
-          </marker>
-        </defs>
-        {edges.map(([from, to, volume, risk]) => {
-          const a = byId[from];
-          const b = byId[to];
-          const width = Math.max(4, Math.min(14, volume / 4));
+    <div className="flow-canvas ops-flow">
+      {!controlledMode && (
+        <div className="mode-tabs">
+          {["flow", "sla", "traffic", "carbon"].map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setLocalMode(item)}>{item}</button>)}
+        </div>
+      )}
+      <svg viewBox="0 0 660 320" role="img" aria-label="Network operations flow canvas">
+        {["Origin", "Main Hub", "Local Hub", "Last Mile"].map((lane, index) => <g key={lane} className="flow-lane"><rect x={24 + index * 158} y="28" width="132" height="248" rx="10" /><text x={42 + index * 158} y="52">{lane}</text></g>)}
+        {edges.map((edge) => {
+          const a = byId[edge.from];
+          const b = byId[edge.to];
+          const pressure = edge[metric];
+          const width = Math.max(5, Math.min(20, pressure / 5));
           return (
-            <g key={`${from}-${to}`} className={`flow-edge ${risk.toLowerCase()}`}>
-              <path d={`M${a.x + 42} ${a.y} C ${a.x + 95} ${a.y}, ${b.x - 95} ${b.y}, ${b.x - 42} ${b.y}`} style={{ strokeWidth: width }} markerEnd="url(#arrow)" />
-              <text x={(a.x + b.x) / 2 - 16} y={(a.y + b.y) / 2 - 8}>{volume}</text>
+            <g key={`${edge.from}-${edge.to}`} className={`flow-edge ${edge.risk.toLowerCase()}`}>
+              <path d={`M${a.x + 104} ${a.y + 35} C ${a.x + 138} ${a.y + 35}, ${b.x - 34} ${b.y + 35}, ${b.x} ${b.y + 35}`} style={{ strokeWidth: width }} />
+              <text x={(a.x + b.x) / 2 + 28} y={(a.y + b.y) / 2 + 24}>{pressure}</text>
             </g>
           );
         })}
         {nodes.map((node) => (
-          <g key={node.id} className={`flow-node ${riskTone(node.risk)}`} transform={`translate(${node.x}, ${node.y})`}>
-            <circle r={Math.max(24, Math.min(42, node.packages / 2))} />
-            <text y="-4">{node.id}</text>
-            <text y="13">{node.packages} pkg</text>
-            {node.dwell && <text y="29">{node.dwell}m dwell</text>}
+          <g key={node.id} className={`flow-node-card ${riskTone(node.risk)}`} transform={`translate(${node.x}, ${node.y})`}>
+            <rect width="112" height="70" rx="8" />
+            <text x="10" y="20">{node.id}</text>
+            <text x="10" y="42">{node.packages} pkg</text>
+            <text x="10" y="60">{node.dwell}m dwell</text>
           </g>
         ))}
       </svg>
       <div className="flow-summary">
-        <span>Node size = active packages</span>
-        <span>Edge width = package flow</span>
-        <span>Purple corridor = active intervention</span>
+        <span>Mode: {label}</span>
+        <span>Edge thickness = selected pressure</span>
+        <span>Node cards = operational state</span>
+        <span>Purple = active intervention corridor</span>
       </div>
     </div>
   );
@@ -581,19 +653,21 @@ function makeTrackingRows(shipments) {
 }
 
 function TrackingMap({ row }) {
+  const route = cachedRouteGeometry;
+  const progress = Math.max(0, Math.min(100, row?.route_progress || 40));
+  const packagePoint = route[Math.min(route.length - 1, Math.floor((progress / 100) * (route.length - 1)))];
+  const [px, py] = projectPoint(packagePoint);
   return (
     <div className="tracking-map">
-      <svg viewBox="0 0 560 300" role="img" aria-label="Selected package tracking map">
-        <rect x="16" y="16" width="528" height="268" rx="16" />
-        <path d="M78 210 C162 122 252 176 332 112 S444 88 494 148" className="geo-route" />
-        <circle cx="78" cy="210" r="12" className="geo-pin origin" />
-        <circle cx="332" cy="112" r="14" className="geo-pin hub" />
-        <circle cx="494" cy="148" r="13" className="geo-pin destination" />
-        <circle cx={90 + (row?.route_progress || 40) * 3.8} cy={190 - (row?.route_progress || 40) * .72} r="11" className="geo-pin package" />
-        <text x="60" y="238">Origin</text>
-        <text x="306" y="92">Hub</text>
-        <text x="454" y="134">Next</text>
-        <text x="34" y="42">{row?.shipment_id || "Select a package"}</text>
+      <svg viewBox="0 0 560 300" role="img" aria-label="Selected package geographic tracking map">
+        <rect x="16" y="16" width="528" height="268" rx="12" />
+        <path d={pointsToPath(route)} className="geo-route" />
+        {route.map((point, index) => {
+          const [x, y] = projectPoint(point);
+          return <g key={point.label} className="geo-stop"><circle cx={x} cy={y} r={index === 0 || index === route.length - 1 ? 12 : 8} /><text x={x + 10} y={y - 8}>{point.label}</text></g>;
+        })}
+        <g className="map-package selected"><circle cx={px} cy={py} r="11" /><text x={px + 13} y={py + 4}>{row?.shipment_id || "Package"}</text></g>
+        <text x="34" y="42">{progress}% route progress / GPS age {row?.gps_age_seconds || 0}s</text>
       </svg>
     </div>
   );
@@ -821,6 +895,23 @@ function PackageTracking({ shared, onOpenPackage }) {
   );
 }
 
+function HubProcessFlow({ selected }) {
+  const score = safeNumber(selected?.congestion_score);
+  const steps = [
+    { label: "Arrival", value: Math.max(12, score - 16) },
+    { label: "Unloading", value: Math.max(10, score - 28) },
+    { label: "Sorting", value: selected?.likely_bottleneck ? Math.min(96, score + 10) : Math.max(18, score - 35) },
+    { label: "Staging", value: Math.max(16, score - 24) },
+    { label: "Loading", value: Math.max(14, score - 38) },
+    { label: "Departure", value: Math.max(10, 100 - score) }
+  ];
+  return (
+    <div className="process-flow-ops">
+      {steps.map((step) => <article key={step.label} className={step.value > 70 ? "hot" : step.value > 45 ? "warm" : ""}><b>{step.label}</b><i style={{ height: `${Math.max(12, step.value)}%` }} /><span>{Math.round(step.value)} pressure</span></article>)}
+    </div>
+  );
+}
+
 function HubOperations({ shared }) {
   const hubRisk = useAsync(api.hubRisk, []);
   const [selectedHub, setSelectedHub] = useState(shared.hubs[0]?.hub_id || "HUB-BKS");
@@ -848,8 +939,8 @@ function HubOperations({ shared }) {
             <Card label="Hubs" value={shared.hubs.length} />
             <Card label="Critical hubs" value={(hubRisk.data || []).filter((h) => h.risk_level === "Critical").length} tone="red" />
             <Card label="Affected packages" value={hubPackages.length} tone="orange" />
-            <Card label="Selected hub score" value={selected ? `${selected.congestion_score}/100` : "N/A"} />
-            <Card label="Likely bottleneck" value={selected?.likely_bottleneck || "None"} />
+            <Card label="Selected hub pressure" value={selected ? `${selected.congestion_score}/100` : "N/A"} detail="composite congestion score" />
+            <Card label="Likely bottleneck" value={selected?.likely_bottleneck || "None"} detail="highest process pressure" />
           </div>
           <div className="two-col">
             <Panel title="Hub Risk Table" icon={Network}>
@@ -866,15 +957,13 @@ function HubOperations({ shared }) {
                 <Button secondary busy={hubBusy} onClick={() => runHubSignal("occupancy")}>Run Occupancy Signal</Button>
                 <Button secondary busy={hubBusy} onClick={() => runHubSignal("overflow")}>Forecast Overflow</Button>
               </div>
-              <div className="process-flow">
-                {["Arrival", "Unloading", "Sorting", "Staging", "Loading", "Departure"].map((step, index) => <span key={step} className={index === 2 && selected?.likely_bottleneck ? "hot" : ""}>{step}</span>)}
-              </div>
-              <HorizontalBars title="Process Deviation" data={[{ label: "Queue", value: selected?.congestion_score || 0 }, { label: "Dwell", value: Math.max(0, (selected?.congestion_score || 0) - 20) }, { label: "Sorting", value: selected?.likely_bottleneck ? 82 : 18 }, { label: "Loading", value: 34 }]} color="#f59e0b" />
+              <HubProcessFlow selected={selected} />
+              <HorizontalBars title="Process Pressure Components" data={[{ label: "Queue pressure", value: selected?.congestion_score || 0 }, { label: "Dwell excess", value: Math.max(0, (selected?.congestion_score || 0) - 20) }, { label: selected?.likely_bottleneck || "Bottleneck", value: selected?.likely_bottleneck ? Math.min(95, (selected?.congestion_score || 0) + 8) : 18 }, { label: "Outbound recovery", value: Math.max(8, 100 - (selected?.congestion_score || 0)) }]} color="#f59e0b" />
             </Panel>
           </div>
           <Panel title="Hub Visual and Forecast Signals" icon={Brain}>
             <Status {...signals}>
-              <VisualSignalStrip signals={signals.data || []} />
+              <SignalStateSummary signals={signals.data || []} />
             </Status>
           </Panel>
           <Panel title="Affected Packages" icon={PackageSearch}>
@@ -898,21 +987,51 @@ function LiveOperations({ shared }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [speed, setSpeed] = useState("5x");
+  const [playing, setPlaying] = useState(false);
+  const [followMode, setFollowMode] = useState("Package");
   useEffect(() => { api.simulationState().then(setState).catch(() => null); }, []);
-  async function action(fn) {
+  async function action(fn, nextPlaying = playing) {
     setBusy(true);
     try {
-      setState(await fn());
+      const next = await fn();
+      setState(next);
+      setPlaying(nextPlaying && !next.complete);
+      return next;
     } finally {
       setBusy(false);
     }
   }
+  async function startRuntime() {
+    await api.simulationPlay();
+    setPlaying(true);
+  }
+  async function pauseRuntime() {
+    await api.simulationPause();
+    setPlaying(false);
+  }
+  useEffect(() => {
+    if (!playing || busy) return undefined;
+    const delay = { "1x": 2400, "2x": 1600, "5x": 900, "10x": 520 }[speed] || 900;
+    const timer = window.setTimeout(async () => {
+      try {
+        const next = await api.simulationNext();
+        setState(next);
+        if (next.complete) {
+          setPlaying(false);
+          await api.simulationPause();
+        }
+      } catch {
+        setPlaying(false);
+      }
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [playing, busy, speed, state?.state?.current_step]);
   const processed = (state?.events || []).filter((event) => event.processed).length;
   const total = state?.events?.length || 0;
   const latest = state?.processed_event || (state?.events || []).filter((event) => event.processed).slice(-1)[0];
   return (
     <>
-      <Header title="Live Operations" description="Replay the synthetic logistics network, process operational events, update package state, create interventions, and watch the network continue toward delivery." action={<span className="badge">Speed {speed}</span>} />
+      <Header title="Live Operations" description="Replay the synthetic logistics network, process operational events, update package state, create interventions, and watch the network continue toward delivery." action={<span className="badge">Runtime {playing ? "Playing" : "Paused"} / {speed}</span>} />
       <div className="metrics-grid">
         <Card label="Runtime status" value={state?.state?.status || "Paused"} />
         <Card label="Demo step" value={state?.state?.current_step ?? 0} />
@@ -923,15 +1042,17 @@ function LiveOperations({ shared }) {
       </div>
       <Panel title="Replay Controls" icon={Play}>
         <div className="control-row">
-          <Button secondary busy={busy} onClick={() => action(api.simulationReset)}>Reset</Button>
-          <Button busy={busy} onClick={() => action(api.simulationNext)}>Step Event</Button>
+          <Button secondary busy={busy} onClick={() => action(api.simulationReset, false)}>Reset</Button>
+          {playing ? <Button secondary busy={busy} onClick={pauseRuntime}>Pause</Button> : <Button busy={busy} onClick={startRuntime}>Start</Button>}
+          <Button secondary busy={busy} onClick={() => action(api.simulationNext, playing)}>Step</Button>
           <select value={speed} onChange={(event) => setSpeed(event.target.value)}><option>1x</option><option>2x</option><option>5x</option><option>10x</option></select>
-          <span className="muted">Backend simulation state is authoritative; this page calls the same event pipeline as Package Reports.</span>
+          <select value={followMode} onChange={(event) => setFollowMode(event.target.value)}><option>Package</option><option>Hub</option><option>Route</option><option>Decision</option></select>
+          <span className="muted">Autoplay repeatedly calls the same backend event processor used by manual Step.</span>
         </div>
       </Panel>
       <div className="two-col overview-main">
         <Panel title="Live Network Flow" icon={Map}>
-          <NetworkFlowCanvas shipments={shared.shipments} hubs={shared.hubs} interventions={state?.alerts || []} />
+          <NetworkFlowCanvas shipments={shared.shipments} hubs={shared.hubs} interventions={state?.alerts || []} mode={followMode === "Hub" ? "traffic" : followMode === "Route" ? "carbon" : followMode === "Decision" ? "sla" : "flow"} />
         </Panel>
         <Panel title="Latest Event Impact" icon={Activity}>
           {latest ? (
@@ -1095,7 +1216,7 @@ function PackageReports({ shared }) {
           <Button busy={busy} onClick={() => runVisualSignal("scenario")}>Run Four-Signal Demo</Button>
           <span className="muted">Signals update package quality, hub context, forecasts, and interventions.</span>
         </div>
-        <VisualSignalStrip signals={[...(view?.visual_intelligence?.package_signals || []), ...(view?.visual_intelligence?.hub_signals || [])]} />
+        <SignalStateSummary signals={[...(view?.visual_intelligence?.package_signals || []), ...(view?.visual_intelligence?.hub_signals || [])]} />
       </Panel>
       <div className="metrics-grid">
         <Card label="Current stage" value={view?.current_state?.stage_label || shipmentStage(shipment)} detail={view?.current_state?.location_id || shipment.current_status || "journey active"} />
@@ -1143,6 +1264,7 @@ function PackageReports({ shared }) {
 function Analytics() {
   const summary = useAsync(api.analytics, []);
   const hubRisk = useAsync(api.hubRisk, []);
+  const [domain, setDomain] = useState("Network");
   const impact = summary.data?.route_impact || {};
   const comparison = {
     current: { metrics: { distance_km: 44.2, fuel_liter: 2.94, co2_kg: 1.65, sla_risk: 0.31 } },
@@ -1161,7 +1283,10 @@ function Analytics() {
               <Card label="SLA risk change" value={formatPp(-(impact.sla_risk_change ?? 0))} tone="orange" />
               <Card label="Critical hubs" value={summary.data.critical_hub_count} tone="red" />
             </div>
-            <Panel title="Route Intervention Comparison" icon={Brain}>
+            <Panel title="Analytics Domain Navigator" icon={Brain}>
+              <div className="mode-tabs domain-tabs">
+                {["Network", "SLA", "Hub", "Route", "Carbon", "Fleet"].map((item) => <button key={item} className={domain === item ? "active" : ""} onClick={() => setDomain(item)}>{item}</button>)}
+              </div>
               <ComparisonGrid impact={comparison} />
             </Panel>
             <div className="viz-grid">
@@ -1172,9 +1297,12 @@ function Analytics() {
               <HorizontalBars title="Operational Signal Mix" data={toSeries(summary.data.visual_signal_counts || {})} color="#0f9d8a" />
               <BarChart title="Forecast Quality Sample" data={[{ label: "On-time", value: 81 }, { label: "Late", value: 14 }, { label: "Reforecasted", value: 39 }, { label: "Improved", value: 22 }]} unit="%" color="#2563eb" />
               <div className="chart-card narrative">
-                <h3>Assumptions</h3>
+                <h3>{domain} Detail</h3>
                 <p>{summary.data.assumptions}</p>
                 <p>SLA deltas are shown in percentage points. Carbon and fuel are displayed as separate physical units.</p>
+                <div className="detail-table-mini">
+                  {(summary.data.latest_visual_signals || []).slice(0, 4).map((signal) => <span key={signal.signal_id}><b>{signal.severity}</b>{signal.signal_type.replaceAll("_", " ")}</span>)}
+                </div>
                 <Sparkline points={[12, 18, 16, 31, 27, 42, 35, 28, 24]} color="#0f9d8a" />
               </div>
             </div>
@@ -1379,7 +1507,7 @@ function DataModels() {
               <div className="table-wrap">
                 <table>
                   <thead><tr><th>Name</th><th>Version</th><th>Type</th><th>Availability</th><th>Metrics</th></tr></thead>
-                  <tbody>{models.data.map((m) => <tr key={m.name}><td>{m.name}</td><td>{m.version}</td><td>{m.model_type}</td><td>{m.availability}</td><td><code>{JSON.stringify(m.metrics)}</code></td></tr>)}</tbody>
+                  <tbody>{models.data.map((m) => <tr key={m.name}><td>{m.name}</td><td>{m.version}</td><td>{m.model_type}</td><td><StatusPill tone={m.availability === "AVAILABLE" ? "green" : "orange"}>{m.availability}</StatusPill></td><td><code>{m.fallback_state || JSON.stringify(m.metrics)}</code></td></tr>)}</tbody>
                 </table>
               </div>
             </Panel>
@@ -1424,6 +1552,7 @@ function App() {
         </div>
       </aside>
       <main>
+        <AppToolbar health={shared.health} shipments={shared.shipments} hubs={shared.hubs} />
         <Status {...bootstrap}>
           {page === "Overview" && <Overview shared={shared} />}
           {page === "Live Operations" && <LiveOperations shared={shared} />}

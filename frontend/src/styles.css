@@ -881,3 +881,177 @@ code { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 880px) {
   .signal-grid { grid-template-columns: 1fr; }
 }
+
+
+.app-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.app-toolbar span {
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+.app-toolbar b { color: #1d4ed8; text-transform: uppercase; }
+.mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.mode-tabs button {
+  border: 1px solid #cbd5e1;
+  background: white;
+  color: #334155;
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+  text-transform: capitalize;
+}
+.mode-tabs button.active {
+  border-color: #2563eb;
+  background: #eef5ff;
+  color: #1d4ed8;
+}
+.ops-flow svg { min-height: 340px; }
+.flow-lane rect {
+  fill: #f8fbff;
+  stroke: #e2e8f0;
+}
+.flow-lane text {
+  fill: #64748b;
+  font-size: 12px;
+  font-weight: 900;
+}
+.flow-node-card rect {
+  fill: white;
+  stroke: #2563eb;
+  stroke-width: 2;
+}
+.flow-node-card.orange rect { stroke: #f97316; fill: #fff7ed; }
+.flow-node-card.red rect { stroke: #dc2626; fill: #fef2f2; }
+.flow-node-card.green rect { stroke: #0f9d8a; fill: #ecfdf5; }
+.flow-node-card text {
+  fill: #0f172a;
+  font-size: 11px;
+  font-weight: 900;
+}
+.ops-flow .flow-edge path {
+  marker-end: none;
+  stroke-linecap: round;
+  opacity: .68;
+}
+.signal-state-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.signal-state {
+  border: 1px solid #dbeafe;
+  border-left: 5px solid #2563eb;
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 14px;
+  min-height: 126px;
+}
+.signal-state.orange { border-left-color: #f59e0b; background: #fff7ed; }
+.signal-state.red { border-left-color: #dc2626; background: #fef2f2; }
+.signal-state.green { border-left-color: #0f9d8a; background: #ecfdf5; }
+.signal-state span, .signal-state small {
+  display: block;
+  color: #64748b;
+  font-weight: 800;
+  font-size: 12px;
+}
+.signal-state b {
+  display: block;
+  margin-top: 8px;
+  text-transform: capitalize;
+}
+.signal-state strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 24px;
+  color: #1d4ed8;
+}
+.process-flow-ops {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 150px;
+  margin-bottom: 14px;
+}
+.process-flow-ops article {
+  position: relative;
+  display: grid;
+  align-content: end;
+  gap: 8px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fbff;
+  overflow: hidden;
+}
+.process-flow-ops article i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(37, 99, 235, .14);
+}
+.process-flow-ops article.warm i { background: rgba(245, 158, 11, .2); }
+.process-flow-ops article.hot i { background: rgba(220, 38, 38, .18); }
+.process-flow-ops b, .process-flow-ops span {
+  position: relative;
+  z-index: 1;
+}
+.process-flow-ops b { font-size: 13px; }
+.process-flow-ops span { color: #64748b; font-size: 12px; font-weight: 800; }
+.route-map.geo rect, .tracking-map rect {
+  fill: #f8fbff;
+  stroke: #c7d9f5;
+}
+.geo-stop circle {
+  fill: #2563eb;
+  stroke: white;
+  stroke-width: 4;
+}
+.geo-stop text, .route-package text {
+  fill: #334155;
+  font-size: 12px;
+  font-weight: 900;
+}
+.route-package circle {
+  fill: #dc2626;
+  stroke: white;
+  stroke-width: 4;
+}
+.detail-table-mini {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.detail-table-mini span {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 7px;
+  color: #475569;
+  font-size: 12px;
+}
+@media (max-width: 1180px) {
+  .signal-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .process-flow-ops { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 880px) {
+  .signal-state-grid, .process-flow-ops { grid-template-columns: 1fr; }
+}
