@@ -173,3 +173,17 @@ def test_fleet_rows_expose_driver_maintenance_and_power_units(client):
     assert ev_rows
     assert all(row["efficiency_unit"] == "kWh/km" for row in ev_rows)
     assert all(row["maintenance_forecast"]["due_low"] <= row["maintenance_forecast"]["due_expected"] <= row["maintenance_forecast"]["due_high"] for row in usage)
+
+
+
+def test_marketing_analytics_business_views(client):
+    summary = client.get("/api/analytics/summary").json()
+    marketing = summary["marketing"]
+    assert marketing["top_order_hubs"]
+    assert marketing["top_destination_zones"]
+    assert marketing["priority_mix"]
+    assert marketing["top_priority_drivers"]
+    assert marketing["daily_order_trend"]
+    assert marketing["hub_revenue_proxy"]
+    assert marketing["top_order_hubs"][0]["orders"] > 0
+    assert marketing["top_priority_drivers"][0]["business_score"] > 0

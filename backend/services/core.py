@@ -1313,6 +1313,56 @@ def simulation_pause() -> dict:
     return simulation_state()
 
 
+
+def marketing_analytics(shipments: list[dict] | None = None) -> dict:
+    shipments = shipments or list_shipments()
+    drivers = {row["assigned_vehicle_id"]: row for row in repo.rows("SELECT * FROM drivers WHERE assigned_vehicle_id IS NOT NULL")}
+    hub_names = {row["hub_id"]: row["name"] for row in list_hubs()}
+    by_hub: dict[str, int] = {}
+    by_destination: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    by_day: dict[str, int] = {}
+    driver_priority: dict[str, dict] = {}
+    revenue_by_hub: dict[str, float] = {}
+    priority_value = {"Critical": 155000, "Express": 118000, "Standard": 72000}
+    for index, shipment in enumerate(shipments):
+        hub = shipment.get("origin_hub") or "UNKNOWN"
+        destination = shipment.get("destination_zone") or "Unknown"
+        priority = shipment.get("priority") or "Standard"
+        by_hub[hub] = by_hub.get(hub, 0) + 1
+        by_destination[destination] = by_destination.get(destination, 0) + 1
+        by_priority[priority] = by_priority.get(priority, 0) + 1
+        day = (_parse_dt(shipment.get("sla_deadline")) or datetime(2026, 7, 10, tzinfo=WIB)).date().isoformat()
+        by_day[day] = by_day.get(day, 0) + 1
+        revenue_by_hub[hub] = revenue_by_hub.get(hub, 0) + priority_value.get(priority, 72000)
+        driver = drivers.get(shipment.get("vehicle_id"), {})
+        driver_name = driver.get("driver_name", "Unassigned")
+        if driver_name != "Unassigned":
+            if driver_name not in driver_priority:
+                driver_priority[driver_name] = {"driver_name": driver_name, "priority_orders": 0, "orders": 0, "sla_weight": 0.0}
+            driver_priority[driver_name]["orders"] += 1
+            if priority in {"Critical", "Express"}:
+                driver_priority[driver_name]["priority_orders"] += 1
+            driver_priority[driver_name]["sla_weight"] += max(0, 100 - float(shipment.get("historical_travel_time_min") or 0) * 0.08)
+    top_hubs = sorted(({"hub_id": hub, "hub_name": hub_names.get(hub, hub), "orders": count, "revenue_proxy_idr": round(revenue_by_hub.get(hub, 0), 0)} for hub, count in by_hub.items()), key=lambda row: row["orders"], reverse=True)
+    top_destinations = sorted(({"zone": zone, "orders": count} for zone, count in by_destination.items()), key=lambda row: row["orders"], reverse=True)[:10]
+    priority_mix = [{"priority": key, "orders": value} for key, value in sorted(by_priority.items())]
+    top_drivers = sorted(({
+        **item,
+        "priority_share": round(item["priority_orders"] / max(item["orders"], 1), 3),
+        "business_score": round(item["priority_orders"] * 12 + item["orders"] * 1.4 + item["sla_weight"] / max(item["orders"], 1), 1),
+    } for item in driver_priority.values()), key=lambda row: row["business_score"], reverse=True)[:10]
+    daily_orders = [{"date": date, "orders": count} for date, count in sorted(by_day.items())]
+    return {
+        "top_order_hubs": top_hubs[:10],
+        "top_destination_zones": top_destinations,
+        "priority_mix": priority_mix,
+        "top_priority_drivers": top_drivers,
+        "daily_order_trend": daily_orders,
+        "hub_revenue_proxy": sorted(top_hubs, key=lambda row: row["revenue_proxy_idr"], reverse=True)[:10],
+        "business_notes": "Revenue is a synthetic priority-weighted proxy for marketing and capacity planning, not real GMV.",
+    }
+
 def analytics_summary() -> dict:
     shipments = list_shipments()
     latest = [repo.row("SELECT * FROM sla_predictions WHERE shipment_id=? ORDER BY created_at DESC LIMIT 1", (s["shipment_id"],)) or {"risk_level": "Low", "probability": 0.1} for s in shipments]
@@ -1361,6 +1411,7 @@ def analytics_summary() -> dict:
         "fleet_utilization": fleet_analysis(),
         "route_impact": impact,
         "historical_impact": history,
+        "marketing": marketing_analytics(shipments),
         "operational_history": {
             "completed_route_interventions": [item for item in list_interventions(status="COMPLETED") if item["intervention_type"] == "ROUTE_REOPTIMIZATION"][:12],
             "delivered_shipments": repo.rows("SELECT * FROM shipments WHERE status='Delivered' ORDER BY shipment_id LIMIT 20"),

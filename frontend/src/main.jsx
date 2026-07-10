@@ -86,6 +86,18 @@ function formatTimeWib(value, withSeconds = false) {
   }).format(date);
 }
 
+function formatDateWib(value) {
+  if (!value) return "N/A";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Jakarta"
+  }).format(date);
+}
+
 function formatMinutes(value) {
   if (value == null || Number.isNaN(Number(value))) return "N/A";
   const n = Math.round(Number(value));
@@ -466,7 +478,8 @@ function DigitalTwinPanel({ twin }) {
         { label: "Expected hub dwell", value: forecast.expected_next_hub_dwell_min != null ? `${forecast.expected_next_hub_dwell_min} min` : "N/A" }
       ]} />
       <TwinCard title="Projected Final" tone="red" rows={[
-        { label: "Delivery ETA", value: projected?.delivery_eta || (actual.final_outcome?.delivered ? "Delivered" : "N/A") },
+        { label: "Delivery ETA", value: projected?.delivery_eta ? formatTimeWib(projected.delivery_eta) : (actual.final_outcome?.delivered ? "Delivered" : "N/A") },
+        { label: "ETA date", value: projected?.delivery_eta ? formatDateWib(projected.delivery_eta) : formatDateWib(actual.final_outcome?.completed_at) },
         { label: "SLA met probability", value: projected?.sla_met_probability != null ? `${Math.round(projected.sla_met_probability * 100)}%` : actual.final_outcome?.sla_status },
         { label: "Total journey time", value: projected?.projected_total_journey_time_min != null ? `${projected.projected_total_journey_time_min} min` : "Final" },
         { label: "Projected carbon", value: projected?.projected_total_carbon_kg != null ? `${projected.projected_total_carbon_kg} kg CO2e` : `${actual.carbon_allocated_so_far_kg ?? 0} kg CO2e` }
@@ -677,7 +690,10 @@ function makeTrackingRows(shipments) {
         origin_label: index % 2 ? "FC-JKT-02" : "FC-JKT-01",
         destination_label: shipment.destination_zone,
         driver_name: drivers[index % drivers.length],
-        eta: shipment.sla_deadline?.slice(11, 16) || "14:42",
+        eta: formatTimeWib(shipment.sla_deadline) || "14:42",
+        order_date: formatDateWib(shipment.sla_deadline),
+        ship_date: formatDateWib(shipment.sla_deadline),
+        sla_date: formatDateWib(shipment.sla_deadline),
         predicted_delay_min: Math.round(risk * 72),
         sla_probability: risk,
         risk_level: riskLevel,
@@ -899,6 +915,9 @@ function PackageTracking({ shared, onOpenPackage }) {
           { key: "vehicle_id", label: "Vehicle" },
           { key: "driver_name", label: "Driver" },
           { key: "eta", label: "ETA" },
+          { key: "order_date", label: "Order Date" },
+          { key: "ship_date", label: "Ship Date" },
+          { key: "sla_date", label: "SLA Date" },
           { key: "predicted_delay_min", label: "Delay", render: (row) => `${row.predicted_delay_min} min` },
           { key: "sla_probability", label: "SLA Risk", render: (row) => <StatusPill tone={riskTone(row.risk_level)}>{formatPercent(row.sla_probability, 1)}</StatusPill> },
           { key: "actual_carbon_kg", label: "CO2 So Far", render: (row) => `${row.actual_carbon_kg.toFixed(2)} kg` },
@@ -927,6 +946,9 @@ function PackageTracking({ shared, onOpenPackage }) {
               ]} />
               <TwinCard title="Forecast" tone="orange" rows={[
                 { label: "ETA", value: selected.eta },
+                { label: "Order date", value: selected.order_date },
+                { label: "Shipping date", value: selected.ship_date },
+                { label: "SLA date", value: selected.sla_date },
                 { label: "Predicted delay", value: `${selected.predicted_delay_min} min` },
                 { label: "SLA buffer", value: `${Math.max(0, 90 - selected.predicted_delay_min)} min` },
                 { label: "Traffic", value: selected.sla_probability > .5 ? "High" : "Normal" }
@@ -1111,7 +1133,7 @@ function LiveOperations({ shared }) {
               <p>{latest.payload?.description || "Operational event processed through the demo pipeline."}</p>
               <div className="comparison-grid">
                 <article className="comparison-card"><span>Before</span><strong>Previous forecast</strong><small>stored in prediction history</small></article>
-                <article className="comparison-card"><span>Event</span><strong>{latest.event_type || "Next event"}</strong><small>{latest.timestamp || state?.state?.current_timestamp}</small></article>
+                <article className="comparison-card"><span>Event</span><strong>{latest.event_type || "Next event"}</strong><small>{formatTimeWib(latest.timestamp || state?.state?.current_timestamp)} · {formatDateWib(latest.timestamp || state?.state?.current_timestamp)}</small></article>
                 <article className="comparison-card"><span>After</span><strong>State updated</strong><small>risk, route, hub and alerts refreshed</small></article>
                 <article className="comparison-card"><span>Action</span><strong>{state?.route_recommendation?.candidate_name || "Monitor"}</strong><small>decision engine result</small></article>
               </div>
@@ -1318,7 +1340,7 @@ function Analytics() {
             </div>
             <Panel title="Analytics Domain Navigator" icon={Brain}>
               <div className="mode-tabs domain-tabs">
-                {["Network", "SLA", "Hub", "Route", "Carbon", "Fleet"].map((item) => <button key={item} className={domain === item ? "active" : ""} onClick={() => setDomain(item)}>{item}</button>)}
+                {["Network", "Marketing", "SLA", "Hub", "Route", "Carbon", "Fleet"].map((item) => <button key={item} className={domain === item ? "active" : ""} onClick={() => setDomain(item)}>{item}</button>)}
               </div>
               <ComparisonGrid impact={comparison} />
             </Panel>
@@ -1329,10 +1351,17 @@ function Analytics() {
               <Heatmap title="Network Exposure Matrix" rows={["HUB-JKT", "HUB-BKS", "HUB-TGR", "LM-ZONE"]} columns={["Queue", "Dwell", "SLA", "Visual"]} values={{ "HUB-JKT-Queue": 71, "HUB-JKT-Dwell": 84, "HUB-JKT-SLA": 67, "HUB-JKT-Visual": 76, "HUB-BKS-Queue": 48, "HUB-BKS-Dwell": 56, "HUB-BKS-SLA": 42, "HUB-BKS-Visual": 35, "HUB-TGR-Queue": 25, "HUB-TGR-Dwell": 22, "HUB-TGR-SLA": 19, "HUB-TGR-Visual": 14, "LM-ZONE-Queue": 36, "LM-ZONE-Dwell": 30, "LM-ZONE-SLA": 51, "LM-ZONE-Visual": 44 }} />
               <HorizontalBars title="Operational Signal Mix" data={toSeries(summary.data.visual_signal_counts || {})} color="#0f9d8a" />
               <BarChart title="Forecast Quality Sample" data={[{ label: "On-time", value: 81 }, { label: "Late", value: 14 }, { label: "Reforecasted", value: 39 }, { label: "Improved", value: 22 }]} unit="%" color="#2563eb" />
+              <HorizontalBars title="Marketing: Hubs With Most Orders" data={(summary.data.marketing?.top_order_hubs || []).slice(0, 8).map((h) => ({ label: h.hub_id, value: h.orders }))} color="#2563eb" />
+              <HorizontalBars title="Marketing: Top Destination Demand" data={(summary.data.marketing?.top_destination_zones || []).map((z) => ({ label: z.zone, value: z.orders }))} color="#0f9d8a" />
+              <DonutChart title="Marketing: Priority Order Mix" data={(summary.data.marketing?.priority_mix || []).map((p) => ({ label: p.priority, value: p.orders }))} />
+              <HorizontalBars title="Marketing: Best Priority Drivers" data={(summary.data.marketing?.top_priority_drivers || []).slice(0, 8).map((d) => ({ label: d.driver_name, value: d.business_score }))} color="#7c3aed" />
+              <BarChart title="Marketing: Daily Order Trend" data={(summary.data.marketing?.daily_order_trend || []).map((d) => ({ label: formatDateWib(d.date), value: d.orders }))} color="#f59e0b" />
+              <HorizontalBars title="Marketing: Hub Revenue Proxy" data={(summary.data.marketing?.hub_revenue_proxy || []).slice(0, 8).map((h) => ({ label: h.hub_id, value: Math.round(h.revenue_proxy_idr / 1000000) }))} unit="M IDR" color="#dc2626" />
               <div className="chart-card narrative">
                 <h3>{domain} Detail</h3>
                 <p>{summary.data.assumptions}</p>
                 <p>SLA deltas are shown in percentage points. Carbon and fuel are displayed as separate physical units.</p>
+                <p>{summary.data.marketing?.business_notes}</p>
                 <div className="detail-table-mini">
                   {(summary.data.latest_visual_signals || []).slice(0, 4).map((signal) => <span key={signal.signal_id}><b>{signal.severity}</b>{signal.signal_type.replaceAll("_", " ")}</span>)}
                 </div>
