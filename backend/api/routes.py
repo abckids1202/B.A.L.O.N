@@ -21,9 +21,29 @@ def vehicles():
     return core.list_vehicles()
 
 
+@router.get("/vehicles/paged")
+def vehicles_paged(page: int = 1, page_size: int = 50, status: str | None = None):
+    return core.paged_vehicles(page=page, page_size=page_size, status=status)
+
+
+@router.get("/drivers")
+def drivers(page: int = 1, page_size: int = 50):
+    return core.list_drivers(page=page, page_size=page_size)
+
+
 @router.get("/shipments")
 def shipments():
     return core.list_shipments()
+
+
+@router.get("/shipments/paged")
+def shipments_paged(page: int = 1, page_size: int = 50, status: str | None = None, q: str | None = None):
+    return core.paged_shipments(page=page, page_size=page_size, status=status, q=q)
+
+
+@router.get("/network/summary")
+def network_summary():
+    return core.synthetic_network_summary()
 
 @router.get("/packages/{shipment_id}/journey-view")
 def package_journey_view(shipment_id: str):

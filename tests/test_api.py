@@ -105,3 +105,29 @@ def test_visual_operational_signals_integrate_with_twins(client):
     assert twin["quality_context"]["latest_damage_signal"]
     summary = client.get("/api/analytics/summary").json()
     assert summary["visual_signal_counts"]["PACKAGE_DAMAGE_RISK_DETECTED"] >= 1
+
+
+
+def test_compact_synthetic_network_scale_and_pagination(client):
+    summary = client.get("/api/network/summary").json()
+    assert summary["counts"]["shipments"] == 500
+    assert summary["counts"]["hubs"] == 12
+    assert summary["counts"]["vehicles"] == 60
+    assert summary["counts"]["drivers"] == 50
+    assert summary["counts"]["routing_jobs"] == 40
+    page = client.get("/api/shipments/paged?page=1&page_size=25").json()
+    assert page["total"] == 500
+    assert len(page["items"]) == 25
+    ids = [item["shipment_id"] for item in page["items"]]
+    assert len(ids) == len(set(ids))
+    drivers = client.get("/api/drivers?page=1&page_size=10").json()
+    assert drivers["total"] == 50
+    assert len(drivers["items"]) == 10
+
+
+def test_synthetic_shipments_are_not_stage_clones(client):
+    shipments = client.get("/api/shipments/paged?page=1&page_size=100").json()["items"]
+    repeated_family_ids = [s["shipment_id"] for s in shipments if s["shipment_id"].count("-") > 1]
+    assert not repeated_family_ids
+    signatures = {(s["vehicle_id"], s["sla_deadline"], round(s["route_distance_km"], 1), s["destination_zone"]) for s in shipments}
+    assert len(signatures) > 85

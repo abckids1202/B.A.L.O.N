@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS hubs (
   hub_id TEXT PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
   normal_dwell_time_min REAL NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS drivers (
+  driver_id TEXT PRIMARY KEY, driver_name TEXT NOT NULL, home_zone TEXT NOT NULL,
+  license_class TEXT NOT NULL, assigned_vehicle_id TEXT, shift_start TEXT, shift_end TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS shipments (
   shipment_id TEXT PRIMARY KEY, origin_hub TEXT NOT NULL, destination_zone TEXT NOT NULL,
   vehicle_id TEXT, load_weight_kg REAL NOT NULL, load_volume_liter REAL NOT NULL, priority TEXT NOT NULL,
@@ -128,7 +133,15 @@ CREATE TABLE IF NOT EXISTS simulation_state (
   id INTEGER PRIMARY KEY CHECK (id = 1), current_step INTEGER DEFAULT 0, status TEXT DEFAULT 'Paused',
   current_timestamp TEXT, active_shipment_id TEXT DEFAULT 'SHP-1028'
 );
+CREATE TABLE IF NOT EXISTS synthetic_network_runs (
+  run_id TEXT PRIMARY KEY, preset TEXT NOT NULL, shipment_count INTEGER NOT NULL,
+  hub_count INTEGER NOT NULL, vehicle_count INTEGER NOT NULL, driver_count INTEGER NOT NULL,
+  routing_job_count INTEGER NOT NULL, operational_event_count INTEGER NOT NULL,
+  assumptions_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status);
+CREATE INDEX IF NOT EXISTS idx_shipments_vehicle ON shipments(vehicle_id);
+CREATE INDEX IF NOT EXISTS idx_shipments_origin ON shipments(origin_hub);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, severity);
 CREATE INDEX IF NOT EXISTS idx_sim_events_step ON simulation_events(step, processed);
 CREATE INDEX IF NOT EXISTS idx_interventions_status ON operational_interventions(status, severity, created_at);

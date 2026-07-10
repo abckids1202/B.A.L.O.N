@@ -41,16 +41,72 @@ def _save_alert(alert: dict | None) -> None:
     )
 
 
+def _paged(sql: str, count_sql: str, params: tuple = (), page: int = 1, page_size: int = 50) -> dict:
+    page = max(1, int(page or 1))
+    page_size = min(max(1, int(page_size or 50)), 200)
+    total = repo.row(count_sql, params)["n"]
+    rows = repo.rows(f"{sql} LIMIT ? OFFSET ?", params + (page_size, (page - 1) * page_size))
+    return {"items": rows, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)}
+
+
 def list_shipments() -> list[dict]:
     return repo.rows("SELECT * FROM shipments ORDER BY shipment_id")
+
+
+def paged_shipments(page: int = 1, page_size: int = 50, status: str | None = None, q: str | None = None) -> dict:
+    clauses = []
+    params: list[Any] = []
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if q:
+        clauses.append("(shipment_id LIKE ? OR destination_zone LIKE ? OR vehicle_id LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like, like])
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return _paged(f"SELECT * FROM shipments{where} ORDER BY priority DESC, shipment_id", f"SELECT count(*) AS n FROM shipments{where}", tuple(params), page, page_size)
 
 
 def list_vehicles() -> list[dict]:
     return repo.rows("SELECT * FROM vehicles ORDER BY vehicle_id")
 
 
+def paged_vehicles(page: int = 1, page_size: int = 50, status: str | None = None) -> dict:
+    where = " WHERE status=?" if status else ""
+    params = (status,) if status else ()
+    return _paged(f"SELECT * FROM vehicles{where} ORDER BY vehicle_id", f"SELECT count(*) AS n FROM vehicles{where}", params, page, page_size)
+
+
 def list_hubs() -> list[dict]:
     return repo.rows("SELECT * FROM hubs ORDER BY hub_id")
+
+
+def list_drivers(page: int = 1, page_size: int = 50) -> dict:
+    return _paged("SELECT * FROM drivers ORDER BY driver_id", "SELECT count(*) AS n FROM drivers", (), page, page_size)
+
+
+def synthetic_network_summary() -> dict:
+    run = repo.row("SELECT * FROM synthetic_network_runs ORDER BY created_at DESC LIMIT 1") or {}
+    if run:
+        run["assumptions"] = repo.jload(run.pop("assumptions_json"), {})
+    hub_rows = repo.rows("SELECT origin_hub AS hub_id, count(*) AS active_shipments FROM shipments WHERE status='Active' GROUP BY origin_hub ORDER BY active_shipments DESC")
+    vehicle_status = repo.rows("SELECT status, count(*) AS count FROM vehicles GROUP BY status")
+    traffic = repo.row("SELECT avg(traffic_index) AS avg_traffic, max(traffic_index) AS max_traffic FROM traffic_snapshots") or {}
+    return {
+        "run": run,
+        "counts": {
+            "shipments": repo.row("SELECT count(*) AS n FROM shipments")["n"],
+            "active_shipments": repo.row("SELECT count(*) AS n FROM shipments WHERE status='Active'")["n"],
+            "hubs": repo.row("SELECT count(*) AS n FROM hubs")["n"],
+            "vehicles": repo.row("SELECT count(*) AS n FROM vehicles")["n"],
+            "drivers": repo.row("SELECT count(*) AS n FROM drivers")["n"],
+            "routing_jobs": run.get("routing_job_count") or repo.row("SELECT count(*) AS n FROM route_recommendations")["n"],
+            "operational_context_events": run.get("operational_event_count") or sum((repo.row(f"SELECT count(*) AS n FROM {table}")["n"] for table in ["traffic_snapshots", "weather_snapshots", "gps_events", "hub_events", "simulation_events"])),
+        },
+        "hub_load": hub_rows,
+        "vehicle_status": vehicle_status,
+        "traffic": traffic,
+    }
 
 
 def operational_snapshot(shipment_id: str) -> dict:
@@ -1156,7 +1212,9 @@ def analytics_summary() -> dict:
             "baseline": "Current seeded route versus selected recommendation.",
         }
     visual_signals = list_operational_signals(limit=200)
+    network = synthetic_network_summary()
     return {
+        "network": network,
         "active_shipments": len([s for s in shipments if s["status"] == "Active"]),
         "risk_distribution": {level: len([r for r in latest if r["risk_level"] == level]) for level in ["Low", "Medium", "High", "Critical"]},
         "predicted_delayed_shipments": len([r for r in latest if r["probability"] >= 0.5]),

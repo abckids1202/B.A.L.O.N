@@ -1,4 +1,11 @@
 {
   "synthetic": true,
-  "scenario": "SHP-1028"
+  "scenario": "SHP-1028",
+  "preset": "COMPACT_PRESENTATION",
+  "shipments": 500,
+  "hubs": 12,
+  "vehicles": 60,
+  "drivers": 50,
+  "routing_jobs": 40,
+  "events": 2400
 }

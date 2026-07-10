@@ -96,8 +96,8 @@ function AppToolbar({ health, shipments = [], hubs = [] }) {
   return (
     <div className="app-toolbar">
       <span><b>{health?.status || "ok"}</b> API</span>
-      <span><b>{active}</b> active packages</span>
-      <span><b>{hubs.length}</b> hubs</span>
+      <span><b>{active}</b> active packages shown</span>
+      <span><b>{hubs.length}</b> nodes</span>
       <span><b>{health?.timezone || "Asia/Jakarta"}</b> timezone</span>
     </div>
   );
@@ -816,17 +816,21 @@ function Overview({ shared }) {
 function PackageTracking({ shared, onOpenPackage }) {
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState("All");
+  const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState("SHP-1028");
-  const rows = makeTrackingRows(shared.shipments)
-    .filter((row) => (stage === "All" || row.stage === stage) && row.shipment_id.toLowerCase().includes(search.toLowerCase()))
+  const paged = useAsync(() => api.shipmentsPaged({ page, page_size: 60, q: search }), [page, search]);
+  const sourceShipments = paged.data?.items?.length ? paged.data.items : shared.shipments.slice(0, 60);
+  const rows = makeTrackingRows(sourceShipments)
+    .filter((row) => stage === "All" || row.stage === stage)
     .sort((a, b) => b.sla_probability - a.sla_probability);
   const selected = rows.find((row) => row.shipment_id === selectedId) || rows[0];
-  const stages = ["All", ...new Set(makeTrackingRows(shared.shipments).map((row) => row.stage))];
+  const totalRows = paged.data?.total || shared.shipments.length;
+  const stages = ["All", ...new Set(makeTrackingRows(sourceShipments).map((row) => row.stage))];
   return (
     <>
       <Header title="Package Tracking" description="Monitor active package locations, ETA, journey progress, SLA exposure, and the next logistics milestone." action={<span className="badge">Last update 8 sec ago</span>} />
       <div className="metrics-grid">
-        <Card label="Active packages" value={rows.length} />
+        <Card label="Active packages" value={totalRows} detail={`${rows.length} shown`} />
         <Card label="In transit" value={rows.filter((r) => /HAUL|INTER_HUB/.test(r.stage)).length} />
         <Card label="At hub" value={rows.filter((r) => /HUB_PROCESSING/.test(r.stage)).length} />
         <Card label="Last mile" value={rows.filter((r) => /LAST_MILE/.test(r.stage)).length} />
@@ -836,8 +840,10 @@ function PackageTracking({ shared, onOpenPackage }) {
         <div className="toolbar">
           <input className="text-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search package ID" />
           <select value={stage} onChange={(event) => setStage(event.target.value)}>{stages.map((item) => <option key={item}>{item}</option>)}</select>
-          <span>View: Table + Detail</span>
-          <span>Auto refresh: Off</span>
+          <span>Server page {paged.data?.page || page} of {paged.data?.pages || 1}</span>
+          <span>{totalRows} packages in network</span>
+          <Button secondary busy={paged.loading} onClick={() => setPage(Math.max(1, page - 1))}>Prev</Button>
+          <Button secondary busy={paged.loading} onClick={() => setPage(Math.min(paged.data?.pages || page + 1, page + 1))}>Next</Button>
         </div>
         <EntityTable columns={[
           { key: "shipment_id", label: "Package" },
@@ -1521,8 +1527,8 @@ function DataModels() {
 function App() {
   const [page, setPage] = useState("Overview");
   const bootstrap = useAsync(async () => {
-    const [health, shipments, vehicles, hubs] = await Promise.all([api.health(), api.shipments(), api.vehicles(), api.hubs()]);
-    return { health, shipments, vehicles, hubs };
+    const [health, shipmentPage, vehiclePage, hubs, network] = await Promise.all([api.health(), api.shipmentsPaged({ page: 1, page_size: 120 }), api.vehiclesPaged({ page: 1, page_size: 120 }), api.hubs(), api.networkSummary()]);
+    return { health, shipments: shipmentPage.items || [], vehicles: vehiclePage.items || [], hubs, network };
   }, []);
 
   const shared = bootstrap.data || { shipments: [], vehicles: [], hubs: [] };
