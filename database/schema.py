@@ -133,6 +133,16 @@ CREATE TABLE IF NOT EXISTS simulation_state (
   id INTEGER PRIMARY KEY CHECK (id = 1), current_step INTEGER DEFAULT 0, status TEXT DEFAULT 'Paused',
   current_timestamp TEXT, active_shipment_id TEXT DEFAULT 'SHP-1028'
 );
+CREATE TABLE IF NOT EXISTS operational_clock (
+  runtime_id TEXT PRIMARY KEY,
+  timezone TEXT NOT NULL,
+  current_demo_time TEXT NOT NULL,
+  wall_clock_reference TEXT,
+  status TEXT NOT NULL,
+  speed_multiplier REAL NOT NULL DEFAULT 1,
+  last_tick_at TEXT,
+  state_version INTEGER NOT NULL DEFAULT 1
+);
 CREATE TABLE IF NOT EXISTS synthetic_network_runs (
   run_id TEXT PRIMARY KEY, preset TEXT NOT NULL, shipment_count INTEGER NOT NULL,
   hub_count INTEGER NOT NULL, vehicle_count INTEGER NOT NULL, driver_count INTEGER NOT NULL,

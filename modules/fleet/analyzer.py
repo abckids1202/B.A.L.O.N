@@ -14,7 +14,7 @@ def analyze_fleet(vehicles: list[dict], shipments: list[dict]) -> dict:
         assigned = [s for s in shipments if s.get("vehicle_id") == vehicle["vehicle_id"] and s.get("status") == "Active"]
         total_weight = sum(s["load_weight_kg"] for s in assigned)
         load_utilization = total_weight / max(vehicle["capacity_weight_kg"], 1)
-        active_minutes = min(480, 120 + len(assigned) * 95 + index * 17) if vehicle["vehicle_id"] in active_ids else 0
+        active_minutes = min(455, 85 + min(len(assigned), 6) * 32 + (index * 23) % 170) if vehicle["vehicle_id"] in active_ids else 0
         available_minutes = 480 if str(vehicle.get("status", "")).lower() != "maintenance" else 0
         utilization_ratio = active_minutes / available_minutes if available_minutes else 0
         distance_today_km = round(active_minutes * (0.38 if vehicle.get("fuel_type") != "electric" else 0.32), 1)

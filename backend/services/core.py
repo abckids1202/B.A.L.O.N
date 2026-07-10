@@ -25,8 +25,61 @@ INTERVENTION_THRESHOLDS = {
     "min_co2_reduction_percent": 2.0,
 }
 
+WIB = timezone(timedelta(hours=7))
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(WIB)
+
+
+def _iso_dt(value: datetime) -> str:
+    return value.astimezone(WIB).replace(microsecond=0).isoformat()
+
+
+def clock_state() -> dict:
+    row = repo.row("SELECT * FROM operational_clock WHERE runtime_id='DEMO-RUNTIME-20260710'")
+    if not row:
+        now = datetime.now(WIB).replace(microsecond=0)
+        return {"runtime_id": "SYSTEM", "timezone": "Asia/Jakarta", "current_demo_time": _iso_dt(now), "status": "SYSTEM", "speed_multiplier": 1, "last_tick_at": _iso_dt(now), "state_version": 0}
+    return row
+
+
 def now_iso() -> str:
-    return datetime.now(timezone(timedelta(hours=7))).replace(microsecond=0).isoformat()
+    return clock_state()["current_demo_time"]
+
+
+def forecast_window(shipment: dict, risk: dict, snap: dict | None = None, stage_index: int = 0) -> dict:
+    current_time = _parse_dt(now_iso()) or datetime.now(WIB)
+    deadline = _parse_dt(shipment.get("sla_deadline")) or (current_time + timedelta(hours=2))
+    expected_delay = float(risk.get("predicted_delay_minutes") or 0)
+    traffic = float((snap or {}).get("traffic_index") or 0.35)
+    weather = float((snap or {}).get("weather_severity") or 0.12)
+    hub_excess = max(0, float((snap or {}).get("hub_dwell_excess_min") or 0))
+    uncertainty = round(8 + traffic * 14 + weather * 10 + min(20, hub_excess * .18) + max(0, 6 - stage_index), 1)
+    low = round(max(0, expected_delay - uncertainty * .55), 1)
+    high = round(expected_delay + uncertainty, 1)
+    planned_remaining = max(12, float(shipment.get("planned_travel_time_min") or 60) * max(.18, (6 - stage_index) / 6))
+    eta_expected = current_time + timedelta(minutes=planned_remaining + expected_delay)
+    eta_earliest = current_time + timedelta(minutes=planned_remaining + low)
+    eta_latest = current_time + timedelta(minutes=planned_remaining + high)
+    next_event_expected = current_time + timedelta(minutes=max(5, min(45, planned_remaining * .32)))
+    return {
+        "forecast_at": _iso_dt(current_time),
+        "delay_low_min": low,
+        "delay_expected_min": round(expected_delay, 1),
+        "delay_high_min": high,
+        "eta_earliest": _iso_dt(eta_earliest),
+        "eta_expected": _iso_dt(eta_expected),
+        "eta_latest": _iso_dt(eta_latest),
+        "expected_next_event_at": _iso_dt(next_event_expected),
+        "sla_deadline": _iso_dt(deadline),
+        "expected_sla_buffer_min": round((eta_expected - deadline).total_seconds() / -60, 1),
+        "best_case_sla_buffer_min": round((eta_earliest - deadline).total_seconds() / -60, 1),
+        "worst_case_sla_buffer_min": round((eta_latest - deadline).total_seconds() / -60, 1),
+        "methodology": "prototype interval from residual baseline plus traffic, weather, hub dwell, and journey-stage uncertainty",
+    }
 
 
 def _save_alert(alert: dict | None) -> None:
@@ -567,7 +620,32 @@ def hub_history(hub_id: str) -> list[dict]:
 
 
 def fleet_analysis() -> dict:
-    return analyze_fleet(list_vehicles(), list_shipments())
+    result = analyze_fleet(list_vehicles(), list_shipments())
+    drivers = {row["assigned_vehicle_id"]: row for row in repo.rows("SELECT * FROM drivers WHERE assigned_vehicle_id IS NOT NULL")}
+    for item in result.get("vehicle_usage", []):
+        driver = drivers.get(item["vehicle_id"], {})
+        vehicle = repo.row("SELECT * FROM vehicles WHERE vehicle_id=?", (item["vehicle_id"],)) or {}
+        remaining_km = max(120, 83000 - float(vehicle.get("current_km") or 0))
+        daily_rate = max(18, float(item.get("distance_today_km") or 0) * 1.18)
+        due_days = max(1, int(remaining_km / daily_rate))
+        due_expected = (_parse_dt(now_iso()) or datetime.now(WIB)) + timedelta(days=due_days)
+        unit = "kWh/km" if vehicle.get("fuel_type") == "electric" else "km/L"
+        efficiency = round(1 / max(float(vehicle.get("fuel_efficiency_km_per_liter") or 18), 1), 3) if vehicle.get("fuel_type") == "electric" else vehicle.get("fuel_efficiency_km_per_liter")
+        item.update({
+            "driver_name": driver.get("driver_name", "Unassigned"),
+            "powertrain": vehicle.get("fuel_type", "unknown"),
+            "efficiency_value": efficiency,
+            "efficiency_unit": unit,
+            "maintenance_forecast": {
+                "remaining_km": round(remaining_km, 0),
+                "daily_distance_rate_km": round(daily_rate, 1),
+                "due_expected": _iso_dt(due_expected),
+                "due_low": _iso_dt(due_expected - timedelta(days=1)),
+                "due_high": _iso_dt(due_expected + timedelta(days=2)),
+                "risk_level": "High" if due_days <= 4 else ("Medium" if due_days <= 10 else "Low"),
+            },
+        })
+    return result
 
 
 def maintenance_analysis(vehicle_id: str) -> dict:
@@ -821,11 +899,21 @@ def package_journey_view(shipment_id: str) -> dict:
     carbon_total = round(sum(c["co2_kg"] for c in repo.rows("SELECT co2_kg FROM carbon_estimates WHERE shipment_id=?", (shipment_id,))), 3)
     if not carbon_total and route_rows:
         carbon_total = round(sum(r["metrics"].get("co2_kg", 0) for r in route_rows), 3)
+    forecast = forecast_window(shipment, {
+        "predicted_delay_minutes": latest_delay["predicted_delay_minutes"] if latest_delay else 0,
+        "sla_probability": latest_sla["sla_probability"] if latest_sla else 0,
+        "sla_level": latest_sla["sla_level"] if latest_sla else "Unknown",
+    }, {
+        "traffic_index": snap["traffic"]["traffic_index"],
+        "weather_severity": snap["weather"]["severity_index"],
+        "hub_dwell_excess_min": round(snap["hub_event"]["average_dwell_time_min"] - snap["hub"]["normal_dwell_time_min"], 1),
+    }, stage_index)
     return {
         "shipment_id": shipment_id,
         "journey_id": f"JRN-{shipment_id}",
         "view_version": step,
         "snapshot_at": state.get("current_timestamp") or now_iso(),
+        "clock": clock_state(),
         "environment": {"mode": "demo", "contains_simulated_data": True},
         "current_state": {
             "stage": stage,
@@ -835,6 +923,11 @@ def package_journey_view(shipment_id: str) -> dict:
             "location_id": location,
             "active_leg_id": None if "HUB" in stage else f"LEG-{shipment_id}-{stage_index:02d}",
             "active_hub_visit_id": f"HVIS-{shipment_id}-{stage_index:02d}" if "HUB" in stage else None,
+            "stage_started_at": state.get("current_timestamp") or now_iso(),
+            "time_in_stage_min": 0,
+            "expected_next_event_at": forecast["expected_next_event_at"],
+            "current_demo_time": now_iso(),
+            "last_operational_update": state.get("current_timestamp") or now_iso(),
         },
         "shipment": shipment,
         "latest_operational_snapshot": {
@@ -856,6 +949,10 @@ def package_journey_view(shipment_id: str) -> dict:
             "delay_source": latest_delay["model_source"] if latest_delay else None,
             "sla_source": latest_sla["model_source"] if latest_sla else None,
             "factors": latest_sla["factors"] if latest_sla else [],
+            "forecast_window": forecast,
+            "sla_deadline": forecast["sla_deadline"],
+            "expected_sla_buffer_min": forecast["expected_sla_buffer_min"],
+            "worst_case_sla_buffer_min": forecast["worst_case_sla_buffer_min"],
         },
         "journey_progress": {
             "stages": [{"key": key, "label": label, "state": "complete" if i < stage_index else ("current" if i == stage_index else "future")} for i, (key, label, _loc) in enumerate(JOURNEY_STAGES)],
@@ -1119,11 +1216,13 @@ def _digital_twin_sections(view: dict) -> dict:
     delivered = stage == "DELIVERED"
     projected_carbon = view["carbon_summary"]["total_co2_kg"]
     actual_carbon = projected_carbon if delivered else round(projected_carbon * (completed_stage_count / max(len(JOURNEY_STAGES) - 1, 1)), 3)
+    forecast = forecast_window(shipment, {"predicted_delay_minutes": projected_delay, "sla_probability": risk["sla_probability"], "sla_level": risk["sla_level"]}, snap, view["view_version"])
     return {
         "shipment_id": view["shipment_id"],
         "journey_id": view["journey_id"],
         "twin_version": view["view_version"],
         "as_of": view["snapshot_at"],
+        "clock": clock_state(),
         "actual": {
             "journey_started_at": "2026-07-05T09:00:00+07:00",
             "elapsed_time_min": elapsed,
@@ -1132,7 +1231,9 @@ def _digital_twin_sections(view: dict) -> dict:
             "carbon_allocated_so_far_kg": actual_carbon,
             "completed_legs": min(completed_stage_count, 3),
             "completed_hub_visits": len([s for s in view["journey_progress"]["completed_stages"] if "HUB" in s]),
-            "final_outcome": {"delivered": delivered, "sla_status": "MET" if delivered and (risk["sla_probability"] or 0) < 0.9 else ("AT_RISK" if not delivered else "REVIEW")},
+            "last_completed_event": view["timeline"][-1]["title"] if view.get("timeline") else None,
+            "last_event_time": view["timeline"][-1]["event_at"] if view.get("timeline") else None,
+            "final_outcome": {"delivered": delivered, "sla_status": "MET" if delivered and (risk["sla_probability"] or 0) < 0.9 else ("AT_RISK" if not delivered else "REVIEW"), "completed_at": view["timeline"][-1]["event_at"] if delivered and view.get("timeline") else None},
         },
         "current": {
             "stage": stage,
@@ -1151,17 +1252,33 @@ def _digital_twin_sections(view: dict) -> dict:
                 "dwell_time_min": snap["hub_dwell_time_min"],
                 "dwell_excess_min": snap["hub_dwell_excess_min"],
             } if current_is_hub else None,
+            "current_demo_time": now_iso(),
+            "stage_started_at": state.get("stage_started_at") or view["snapshot_at"],
+            "time_in_current_stage_min": state.get("time_in_stage_min", 0),
+            "last_operational_update": state.get("last_operational_update") or view["snapshot_at"],
         },
         "forecast": {
             "predicted_delay_min": projected_delay,
+            "delay_low_min": forecast["delay_low_min"],
+            "delay_high_min": forecast["delay_high_min"],
+            "eta_earliest": forecast["eta_earliest"],
+            "eta_expected": forecast["eta_expected"],
+            "eta_latest": forecast["eta_latest"],
+            "sla_deadline": forecast["sla_deadline"],
+            "expected_sla_buffer_min": forecast["expected_sla_buffer_min"],
+            "worst_case_sla_buffer_min": forecast["worst_case_sla_buffer_min"],
             "sla_breach_probability": risk["sla_probability"],
             "sla_level": risk["sla_level"],
             "next_milestone": view["journey_progress"]["future_stages"][0] if view["journey_progress"]["future_stages"] else None,
+            "expected_next_event_at": forecast["expected_next_event_at"],
             "expected_next_hub_dwell_min": None if current_is_hub or delivered else 35,
             "main_factors": risk["factors"],
         },
         "projected_final": None if delivered else {
-            "delivery_eta": shipment.get("sla_deadline"),
+            "earliest_delivery_time": forecast["eta_earliest"],
+            "delivery_eta": forecast["eta_expected"],
+            "latest_delivery_time": forecast["eta_latest"],
+            "estimated_remaining_time_min": round(max(0, (float(shipment.get("planned_travel_time_min") or 0) + projected_delay) * max(.12, (6 - completed_stage_count) / 6)), 1),
             "sla_met_probability": round(1 - (risk["sla_probability"] or 0), 3),
             "projected_total_journey_time_min": projected_total_time,
             "projected_total_delay_min": projected_delay,
@@ -1213,6 +1330,27 @@ def analytics_summary() -> dict:
         }
     visual_signals = list_operational_signals(limit=200)
     network = synthetic_network_summary()
+    impact_rows = repo.rows("SELECT * FROM intervention_impacts WHERE status IN ('IMPROVED','COMPLETED','PENDING_RESULT')")
+    history = {"interventions_completed": 0, "improved_interventions": 0, "distance_avoided_km": 0, "fuel_avoided_liter": 0, "energy_avoided_kwh": 0, "co2e_avoided_kg": 0, "delay_reduced_min": 0, "avg_sla_risk_change_pp": 0}
+    sla_changes = []
+    for row in impact_rows:
+        evidence = repo.jload(row.get("evidence_json"), {})
+        before = evidence.get("before", {})
+        after = evidence.get("after", {})
+        history["interventions_completed"] += 1
+        if row.get("status") == "IMPROVED":
+            history["improved_interventions"] += 1
+        history["distance_avoided_km"] += max(0, float(before.get("distance_km") or 0) - float(after.get("distance_km") or 0))
+        history["fuel_avoided_liter"] += max(0, float(before.get("fuel_liter") or 0) - float(after.get("fuel_liter") or 0))
+        history["energy_avoided_kwh"] += max(0, float(before.get("energy_kwh") or 0) - float(after.get("energy_kwh") or 0))
+        history["co2e_avoided_kg"] += max(0, float(before.get("co2_kg") or 0) - float(after.get("co2_kg") or 0))
+        history["delay_reduced_min"] += max(0, -(float(row.get("actual_reforecast_delay_change_min") or row.get("expected_delay_change_min") or 0)))
+        if row.get("actual_reforecast_sla_change_pp") is not None:
+            sla_changes.append(float(row["actual_reforecast_sla_change_pp"]))
+    for key in ["distance_avoided_km", "fuel_avoided_liter", "energy_avoided_kwh", "co2e_avoided_kg", "delay_reduced_min"]:
+        history[key] = round(history[key], 2)
+    history["avg_sla_risk_change_pp"] = round(sum(sla_changes) / len(sla_changes), 2) if sla_changes else 0
+    history["methodology"] = "Aggregates completed intervention_impacts using positive before-after reductions; SLA is average percentage-point change."
     return {
         "network": network,
         "active_shipments": len([s for s in shipments if s["status"] == "Active"]),
@@ -1222,6 +1360,13 @@ def analytics_summary() -> dict:
         "daily_carbon_estimate_kg": round(sum(c["metrics"]["co2_kg"] for c in candidates), 2) if candidates else 0,
         "fleet_utilization": fleet_analysis(),
         "route_impact": impact,
+        "historical_impact": history,
+        "operational_history": {
+            "completed_route_interventions": [item for item in list_interventions(status="COMPLETED") if item["intervention_type"] == "ROUTE_REOPTIMIZATION"][:12],
+            "delivered_shipments": repo.rows("SELECT * FROM shipments WHERE status='Delivered' ORDER BY shipment_id LIMIT 20"),
+            "resolved_hub_incidents": repo.rows("SELECT * FROM hub_overflow_forecasts ORDER BY created_at DESC LIMIT 10"),
+            "maintenance_reviews": repo.rows("SELECT * FROM maintenance_predictions ORDER BY created_at DESC LIMIT 10"),
+        },
         "visual_signal_counts": count_by_signal_type(visual_signals),
         "visual_signal_severity": count_by_signal_severity(visual_signals),
         "latest_visual_signals": visual_signals[:8],

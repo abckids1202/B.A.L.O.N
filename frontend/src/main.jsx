@@ -55,6 +55,46 @@ function fmt(value, unit = "") {
   return `${shown}${unit}`;
 }
 
+
+function formatDateTimeWib(value, withSeconds = false) {
+  if (!value) return "N/A";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: withSeconds ? "2-digit" : undefined,
+    hour12: false,
+    timeZone: "Asia/Jakarta",
+    timeZoneName: "short"
+  }).format(date).replace(",", " ·");
+}
+
+function formatTimeWib(value, withSeconds = false) {
+  if (!value) return "N/A";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: withSeconds ? "2-digit" : undefined,
+    hour12: false,
+    timeZone: "Asia/Jakarta"
+  }).format(date);
+}
+
+function formatMinutes(value) {
+  if (value == null || Number.isNaN(Number(value))) return "N/A";
+  const n = Math.round(Number(value));
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  if (abs >= 60) return `${sign}${Math.floor(abs / 60)}h ${abs % 60}m`;
+  return `${sign}${abs} min`;
+}
+
 function countBy(items, getter) {
   return items.reduce((acc, item) => {
     const key = getter(item) || "unknown";
@@ -91,14 +131,16 @@ function shipmentStage(shipment) {
   return "Origin processing";
 }
 
-function AppToolbar({ health, shipments = [], hubs = [] }) {
+function AppToolbar({ health, shipments = [], hubs = [], clock }) {
   const active = shipments.filter((shipment) => shipment.status === "Active").length;
   return (
     <div className="app-toolbar">
       <span><b>{health?.status || "ok"}</b> API</span>
+      <span><b>{clock?.status || "DEMO"}</b> runtime</span>
+      <span><b>{formatTimeWib(clock?.current_demo_time, true)}</b> WIB</span>
+      <span><b>{clock?.speed_multiplier || 1}x</b> speed</span>
       <span><b>{active}</b> active packages shown</span>
       <span><b>{hubs.length}</b> nodes</span>
-      <span><b>{health?.timezone || "Asia/Jakarta"}</b> timezone</span>
     </div>
   );
 }
@@ -369,7 +411,7 @@ function Timeline({ events }) {
     <div className="timeline">
       {events.map((event) => (
         <article key={event.event_id || `${event.title}-${event.time || event.event_at}`} className={event.tone || riskTone(event.severity)}>
-          <time>{event.time || String(event.event_at || "").slice(11, 16) || "Now"}</time>
+          <time>{event.time || formatTimeWib(event.event_at, false) || "Now"}</time>
           <div>
             <b>{event.title}</b>
             <p>{event.description}</p>
@@ -486,32 +528,33 @@ function SignalStateSummary({ signals = [] }) {
   );
 }
 
-function InterventionQueue({ interventions, onAccept, onReject, busy }) {
+function OperationalActions({ interventions }) {
   if (!interventions?.length) {
-    return <EmptyState>No material operational intervention is active for this package.</EmptyState>;
+    return <EmptyState>No active operational action. Journey remains under automated monitoring.</EmptyState>;
   }
   return (
     <div className="intervention-list">
-      {interventions.slice(0, 5).map((item) => (
-        <article className="intervention-card" key={item.intervention_id}>
-          <div>
-            <b>{item.intervention_type.replaceAll("_", " ")}</b>
-            <span>{item.status} / {item.severity}</span>
-          </div>
-          <p>{item.reason}</p>
-          {item.impact && (
-            <small>
-              SLA {item.impact.actual_reforecast_sla_change_pp ?? item.impact.expected_sla_change_pp} pp /
-              Delay {item.impact.actual_reforecast_delay_change_min ?? item.impact.expected_delay_change_min} min /
-              CO2 {item.impact.actual_reforecast_co2_change_kg ?? item.impact.expected_co2_change_kg} kg
-            </small>
-          )}
-          <div className="control-row">
-            <Button secondary busy={busy} onClick={() => onAccept(item.intervention_id)}>Accept</Button>
-            <Button secondary busy={busy} onClick={() => onReject(item.intervention_id)}>Reject</Button>
-          </div>
-        </article>
-      ))}
+      {interventions.slice(0, 5).map((item) => {
+        const impact = item.impact || {};
+        return (
+          <article className="intervention-card" key={item.intervention_id}>
+            <div>
+              <b>{item.intervention_type.replaceAll("_", " ")}</b>
+              <span>{item.status} · {item.severity}</span>
+            </div>
+            <p><b>Problem</b><br />{item.reason}</p>
+            <p><b>B.A.L.O.N Decision</b><br />{item.recommended_action || "Monitor under automated policy."}</p>
+            <p><b>Action Status</b><br />{item.status === "COMPLETED" ? "Applied automatically" : "Active / monitoring"}</p>
+            {impact && (
+              <small>
+                Expected effect: delay {formatMinutes(impact.actual_reforecast_delay_change_min ?? impact.expected_delay_change_min)} /
+                SLA {impact.actual_reforecast_sla_change_pp ?? impact.expected_sla_change_pp ?? "0"} pp /
+                CO2 {impact.actual_reforecast_co2_change_kg ?? impact.expected_co2_change_kg ?? 0} kg
+              </small>
+            )}
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -765,7 +808,7 @@ function Overview({ shared }) {
   ];
   return (
     <>
-      <Header title="B.A.L.O.N Operations" description="Monitor shipment journeys, hub operations, route risk, fleet status, and logistics interventions across the synthetic logistics network." action={<span className="badge">Demo time {new Date().toLocaleTimeString()}</span>} />
+      <Header title="B.A.L.O.N Operations" description="Monitor shipment journeys, hub operations, route risk, fleet status, and logistics actions across the synthetic logistics network." action={<span className="badge">Demo time {formatTimeWib(shared.clock?.current_demo_time, true)} WIB · {shared.clock?.speed_multiplier || 1}x</span>} />
       <Status {...summary}>
         {summary.data && (
           <>
@@ -1105,6 +1148,8 @@ function PackageReports({ shared }) {
   const shipment = view?.shipment || shared.shipments.find((s) => s.shipment_id === shipmentId) || shared.shipments[0] || {};
   const current = view?.latest_operational_snapshot || {};
   const risk = view?.latest_risk || {};
+  const forecast = risk.forecast_window || twin?.forecast || {};
+  const clock = view?.clock || twin?.clock || shared.clock || {};
 
   async function loadView(id = shipmentId) {
     setBusy(true);
@@ -1158,26 +1203,6 @@ function PackageReports({ shared }) {
   const currentHubDwell = twin?.current?.hub ? `${twin.current.hub.dwell_time_min} min` : "N/A";
   const currentHubDetail = twin?.current?.hub ? `${twin.current.hub.dwell_excess_min ?? 0} min vs baseline` : "Not currently at a hub";
 
-  async function acceptIntervention(interventionId) {
-    setBusy(true);
-    try {
-      await api.acceptIntervention(interventionId);
-      await loadView(shipmentId);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function rejectIntervention(interventionId) {
-    setBusy(true);
-    try {
-      await api.rejectIntervention(interventionId);
-      await loadView(shipmentId);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function runVisualSignal(kind) {
     setBusy(true);
     setError("");
@@ -1195,7 +1220,7 @@ function PackageReports({ shared }) {
 
   return (
     <>
-      <Header title="Package Reports" description="Follow a package from origin to buyer with one coherent journey view, risk state, event timeline, hub dwell, route decisions, and carbon context." />
+      <Header title="Package Reports" description="Follow a package from origin to buyer with demo time, forecast windows, SLA buffer, operational actions, and a chronological journey stream." action={<span className="badge">● {clock.status || "DEMO"} · {formatTimeWib(clock.current_demo_time, true)} WIB · {clock.speed_multiplier || 1}x</span>} />
       <Panel title="Package Selector and Demo Scenario" icon={PackageSearch}>
         <div className="control-row">
           <select value={shipmentId} onChange={(event) => setShipmentId(event.target.value)}>
@@ -1212,10 +1237,10 @@ function PackageReports({ shared }) {
       <Panel title="Shipment Journey Digital Twin" icon={Activity}>
         <DigitalTwinPanel twin={twin} />
       </Panel>
-      <Panel title="Operational Intervention Queue" icon={AlertTriangle}>
-        <InterventionQueue interventions={view?.active_interventions || twin?.active_interventions || []} onAccept={acceptIntervention} onReject={rejectIntervention} busy={busy} />
+      <Panel title="B.A.L.O.N Operational Actions" icon={AlertTriangle}>
+        <OperationalActions interventions={view?.active_interventions || twin?.active_interventions || []} />
       </Panel>
-      <Panel title="Visual Operational Signals" icon={Brain}>
+      <Panel title="Operational Signal & Forecast State" icon={Brain}>
         <div className="control-row">
           <Button secondary busy={busy} onClick={() => runVisualSignal("damage")}>Run Damage Scan</Button>
           <Button secondary busy={busy} onClick={() => runVisualSignal("loading")}>Validate Loading</Button>
@@ -1226,14 +1251,15 @@ function PackageReports({ shared }) {
       </Panel>
       <div className="metrics-grid">
         <Card label="Current stage" value={view?.current_state?.stage_label || shipmentStage(shipment)} detail={view?.current_state?.location_id || shipment.current_status || "journey active"} />
-        <Card label="Delay prediction" value={risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} tone={riskTone(risk.sla_level)} />
-        <Card label="SLA breach risk" value={risk.sla_probability != null ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} detail={risk.sla_level} tone={riskTone(risk.sla_level)} />
+        <Card label="Delay forecast" value={forecast.delay_expected_min != null ? `${forecast.delay_expected_min} min` : risk.predicted_delay_minutes != null ? `${risk.predicted_delay_minutes} min` : "n/a"} detail={forecast.delay_low_min != null ? `Range ${forecast.delay_low_min}-${forecast.delay_high_min} min` : "estimated window"} tone={riskTone(risk.sla_level)} />
+        <Card label="SLA breach risk" value={risk.sla_probability != null ? `${Math.round(risk.sla_probability * 100)}%` : "n/a"} detail={`Deadline ${formatTimeWib(forecast.sla_deadline || risk.sla_deadline)} · Buffer ${formatMinutes(forecast.expected_sla_buffer_min ?? risk.expected_sla_buffer_min)}`} tone={riskTone(risk.sla_level)} />
         <Card label="Traffic index" value={current.traffic_index ?? "n/a"} detail="latest provider snapshot" />
         <Card label="Current hub dwell" value={currentHubDwell} detail={currentHubDetail} />
-        <Card label="Quality score" value={shipment.loading_compliance_score ?? "n/a"} detail={twin?.quality_context?.active_quality_hold ? "visual hold active" : "no active hold"} tone={twin?.quality_context?.active_quality_hold ? "red" : "green"} />
+        <Card label="ETA window" value={formatTimeWib(forecast.eta_expected || twin?.projected_final?.delivery_eta)} detail={`${formatTimeWib(forecast.eta_earliest || twin?.projected_final?.earliest_delivery_time)}-${formatTimeWib(forecast.eta_latest || twin?.projected_final?.latest_delivery_time)}`} tone={riskTone(risk.sla_level)} />
+        <Card label="Quality score" value={shipment.loading_compliance_score ?? "n/a"} detail={twin?.quality_context?.active_quality_hold ? "inspection hold policy" : "monitor"} tone={twin?.quality_context?.active_quality_hold ? "red" : "green"} />
       </div>
       <div className="two-col">
-        <Panel title="Journey Timeline" icon={ClipboardList}>
+        <Panel title="Package Journey Event Stream" icon={ClipboardList}>
           <Timeline events={timeline} />
         </Panel>
         <Panel title="Package Context" icon={Server}>
@@ -1283,11 +1309,12 @@ function Analytics() {
         {summary.data && (
           <>
             <div className="metrics-grid">
-              <Card label="Distance avoided" value={`${impact.distance_reduction_km ?? 0} km`} tone="green" />
-              <Card label="Fuel avoided" value={`${impact.fuel_reduction_liter ?? 0} L`} tone="green" />
-              <Card label="CO2e avoided" value={`${impact.co2_reduction_kg ?? 0} kg`} tone="green" />
-              <Card label="SLA risk change" value={formatPp(-(impact.sla_risk_change ?? 0))} tone="orange" />
-              <Card label="Critical hubs" value={summary.data.critical_hub_count} tone="red" />
+              <Card label="Distance avoided" value={`${summary.data.historical_impact?.distance_avoided_km ?? impact.distance_reduction_km ?? 0} km`} tone="green" />
+              <Card label="Fuel avoided" value={`${summary.data.historical_impact?.fuel_avoided_liter ?? impact.fuel_reduction_liter ?? 0} L`} tone="green" />
+              <Card label="Energy avoided" value={`${summary.data.historical_impact?.energy_avoided_kwh ?? 0} kWh`} tone="green" />
+              <Card label="CO2e avoided" value={`${summary.data.historical_impact?.co2e_avoided_kg ?? impact.co2_reduction_kg ?? 0} kg`} tone="green" />
+              <Card label="Avg SLA risk change" value={`${summary.data.historical_impact?.avg_sla_risk_change_pp ?? 0} pp`} tone="orange" />
+              <Card label="Delay reduced" value={`${summary.data.historical_impact?.delay_reduced_min ?? 0} min`} tone="green" />
             </div>
             <Panel title="Analytics Domain Navigator" icon={Brain}>
               <div className="mode-tabs domain-tabs">
@@ -1428,25 +1455,21 @@ function Fleet({ shared }) {
           <>
             <div className="metrics-grid">
               <Card label="Total vehicles" value={fleet.data.total_vehicle_count} />
-              <Card label="Active vehicles" value={fleet.data.active_vehicle_count} tone="green" />
-              <Card label="Idle vehicles" value={fleet.data.idle_vehicle_count} tone="orange" />
+              <Card label="Assigned vehicles" value={fleet.data.active_vehicle_count} tone="green" />
+              <Card label="Idle / maintenance" value={`${fleet.data.idle_vehicle_count} / ${fleet.data.maintenance_vehicle_count}`} tone="orange" />
               <Card label="Average utilization" value={formatPercent(fleet.data.average_utilization_ratio)} />
-              <Card label="High-use vehicles" value={fleet.data.high_use_vehicles?.length || 0} tone="red" />
-            </div>
-            <div className="viz-grid">
-              <HorizontalBars title="Vehicle Utilization" data={usage.map((u) => ({ label: u.vehicle_id, value: Math.round(u.utilization_ratio * 100) }))} unit="%" color="#2563eb" />
-              <DonutChart title="Fleet Status" data={toSeries({ Active: fleet.data.active_vehicle_count, Idle: fleet.data.idle_vehicle_count, Maintenance: fleet.data.maintenance_vehicle_count, Unavailable: fleet.data.unavailable_vehicle_count })} />
-              <BarChart title="Distance Today" data={usage.map((u) => ({ label: u.vehicle_id, value: u.distance_today_km }))} unit="km" color="#0f9d8a" />
+              <Card label="Drivers assigned" value={usage.filter((u) => u.driver_name && u.driver_name !== "Unassigned").length} />
             </div>
             <Panel title="Vehicle Operations Table" icon={Truck}>
               <EntityTable columns={[
                 { key: "vehicle_id", label: "Vehicle" },
-                { key: "status", label: "Status", render: (row) => <StatusPill tone={row.status === "Active" ? "green" : "orange"}>{row.status}</StatusPill> },
+                { key: "driver_name", label: "Driver" },
+                { key: "status", label: "Status", render: (row) => <StatusPill tone={row.status === "Active" ? "green" : row.status === "Maintenance" ? "red" : "orange"}>{row.status}</StatusPill> },
                 { key: "shipment_count", label: "Packages" },
                 { key: "utilization_ratio", label: "Utilization", render: (row) => formatPercent(row.utilization_ratio) },
                 { key: "load_utilization", label: "Load", render: (row) => formatPercent(row.load_utilization) },
                 { key: "distance_today_km", label: "Distance" , render: (row) => `${row.distance_today_km} km` },
-                { key: "active_operating_minutes", label: "Active min" }
+                { key: "maintenance", label: "Maintenance Forecast", render: (row) => <StatusPill tone={riskTone(row.maintenance_forecast?.risk_level)}>{row.maintenance_forecast?.risk_level || "N/A"} · {formatDateTimeWib(row.maintenance_forecast?.due_expected)}</StatusPill> }
               ]} rows={usage.map((u) => ({ ...u, id: u.vehicle_id }))} selectedId={vehicleId} onSelect={(row) => setVehicleId(row.vehicle_id)} />
             </Panel>
           </>
@@ -1454,10 +1477,10 @@ function Fleet({ shared }) {
       </Status>
       <Panel title={`${vehicleId} Vehicle Digital Twin`} icon={Truck}>
         <div className="twin-grid">
-          <TwinCard title="Assignment" rows={[{ label: "Driver", value: vehicleId.startsWith("MTR") ? "Courier Dimas" : "Driver Raka" }, { label: "Current package", value: shared.shipments.find((s) => s.vehicle_id === vehicleId)?.shipment_id || "None" }, { label: "Status", value: selectedVehicle.status || "N/A" }]} />
+          <TwinCard title="Assignment" rows={[{ label: "Driver", value: usage.find((u) => u.vehicle_id === vehicleId)?.driver_name || "Unassigned" }, { label: "Current package", value: shared.shipments.find((s) => s.vehicle_id === vehicleId)?.shipment_id || "None" }, { label: "Status", value: selectedVehicle.status || "N/A" }]} />
           <TwinCard title="Utilization" tone="green" rows={[{ label: "Active minutes", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.active_operating_minutes || 0} min` }, { label: "Available minutes", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.available_operating_minutes || 0} min` }, { label: "Distance today", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.distance_today_km || 0} km` }]} />
-          <TwinCard title="Cost / Carbon" tone="orange" rows={[{ label: "Fuel or energy", value: selectedVehicle.fuel_type || "N/A" }, { label: "Efficiency", value: `${selectedVehicle.fuel_efficiency_km_per_liter || 0} km/L` }, { label: "Estimated cost", value: "Rp87,040" }]} />
-          <TwinCard title="Maintenance" tone="red" rows={[{ label: "Last service", value: selectedVehicle.last_service_date || "N/A" }, { label: "Current KM", value: selectedVehicle.current_km || 0 }, { label: "Next action", value: maintenance?.risk_level || "Check when selected" }]} />
+          <TwinCard title="Cost / Carbon" tone="orange" rows={[{ label: "Fuel or energy", value: selectedVehicle.fuel_type || "N/A" }, { label: "Efficiency", value: `${usage.find((u) => u.vehicle_id === vehicleId)?.efficiency_value || selectedVehicle.fuel_efficiency_km_per_liter || 0} ${usage.find((u) => u.vehicle_id === vehicleId)?.efficiency_unit || "km/L"}` }, { label: "Estimated cost", value: "Rp87,040" }]} />
+          <TwinCard title="Maintenance" tone="red" rows={[{ label: "Last service", value: selectedVehicle.last_service_date || "N/A" }, { label: "Current KM", value: selectedVehicle.current_km || 0 }, { label: "Forecast", value: usage.find((u) => u.vehicle_id === vehicleId)?.maintenance_forecast?.risk_level || maintenance?.risk_level || "Monitoring" }, { label: "Due window", value: formatDateTimeWib(usage.find((u) => u.vehicle_id === vehicleId)?.maintenance_forecast?.due_expected) }]} />
         </div>
         <div className="control-row"><Button onClick={checkVehicle} busy={busy} secondary>Analyze Preventive Check-Up</Button></div>
       </Panel>
@@ -1527,8 +1550,8 @@ function DataModels() {
 function App() {
   const [page, setPage] = useState("Overview");
   const bootstrap = useAsync(async () => {
-    const [health, shipmentPage, vehiclePage, hubs, network] = await Promise.all([api.health(), api.shipmentsPaged({ page: 1, page_size: 120 }), api.vehiclesPaged({ page: 1, page_size: 120 }), api.hubs(), api.networkSummary()]);
-    return { health, shipments: shipmentPage.items || [], vehicles: vehiclePage.items || [], hubs, network };
+    const [health, shipmentPage, vehiclePage, hubs, network, clock] = await Promise.all([api.health(), api.shipmentsPaged({ page: 1, page_size: 120 }), api.vehiclesPaged({ page: 1, page_size: 120 }), api.hubs(), api.networkSummary(), api.clock()]);
+    return { health, shipments: shipmentPage.items || [], vehicles: vehiclePage.items || [], hubs, network, clock };
   }, []);
 
   const shared = bootstrap.data || { shipments: [], vehicles: [], hubs: [] };
@@ -1558,7 +1581,7 @@ function App() {
         </div>
       </aside>
       <main>
-        <AppToolbar health={shared.health} shipments={shared.shipments} hubs={shared.hubs} />
+        <AppToolbar health={shared.health} shipments={shared.shipments} hubs={shared.hubs} clock={shared.clock} />
         <Status {...bootstrap}>
           {page === "Overview" && <Overview shared={shared} />}
           {page === "Live Operations" && <LiveOperations shared={shared} />}

@@ -45,6 +45,11 @@ def shipments_paged(page: int = 1, page_size: int = 50, status: str | None = Non
 def network_summary():
     return core.synthetic_network_summary()
 
+
+@router.get("/clock")
+def clock():
+    return core.clock_state()
+
 @router.get("/packages/{shipment_id}/journey-view")
 def package_journey_view(shipment_id: str):
     return handle(core.package_journey_view, shipment_id)

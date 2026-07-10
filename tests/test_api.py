@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -131,3 +133,43 @@ def test_synthetic_shipments_are_not_stage_clones(client):
     assert not repeated_family_ids
     signatures = {(s["vehicle_id"], s["sla_deadline"], round(s["route_distance_km"], 1), s["destination_zone"]) for s in shipments}
     assert len(signatures) > 85
+
+
+
+def test_time_clock_forecast_and_sla_windows(client):
+    clock = client.get("/api/clock").json()
+    assert clock["timezone"] == "Asia/Jakarta"
+    assert clock["current_demo_time"]
+    twin = client.get("/api/packages/SHP-1028/digital-twin").json()
+    forecast = twin["forecast"]
+    eta_earliest = datetime.fromisoformat(forecast["eta_earliest"])
+    eta_expected = datetime.fromisoformat(forecast["eta_expected"])
+    eta_latest = datetime.fromisoformat(forecast["eta_latest"])
+    assert eta_earliest <= eta_expected <= eta_latest
+    assert forecast["delay_low_min"] <= forecast["predicted_delay_min"] <= forecast["delay_high_min"]
+    assert "expected_sla_buffer_min" in forecast
+
+
+def test_historical_impact_is_aggregated_from_completed_records(client):
+    summary = client.get("/api/analytics/summary").json()
+    impact = summary["historical_impact"]
+    assert impact["interventions_completed"] >= 24
+    assert impact["improved_interventions"] >= 19
+    assert impact["distance_avoided_km"] > 0
+    assert impact["fuel_avoided_liter"] > 0
+    assert impact["energy_avoided_kwh"] > 0
+    assert impact["co2e_avoided_kg"] > 0
+    assert impact["delay_reduced_min"] > 0
+    assert "methodology" in impact
+
+
+def test_fleet_rows_expose_driver_maintenance_and_power_units(client):
+    fleet = client.post("/api/fleet/analyze").json()
+    usage = fleet["vehicle_usage"]
+    assert any(row["driver_name"] != "Unassigned" for row in usage)
+    assert any(row["status"] != "Active" for row in usage)
+    assert len({row["active_operating_minutes"] for row in usage}) > 10
+    ev_rows = [row for row in usage if row["powertrain"] == "electric"]
+    assert ev_rows
+    assert all(row["efficiency_unit"] == "kWh/km" for row in ev_rows)
+    assert all(row["maintenance_forecast"]["due_low"] <= row["maintenance_forecast"]["due_expected"] <= row["maintenance_forecast"]["due_high"] for row in usage)

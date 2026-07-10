@@ -21,7 +21,7 @@ PRESETS = {
     "STRESS_DEVELOPMENT": {"shipments": 25000, "hubs": 50, "vehicles": 500, "drivers": 400, "routing_jobs": 1000, "events": 100000},
 }
 
-BASE_TIME = datetime(2026, 7, 5, 8, 0, tzinfo=timezone(timedelta(hours=7)))
+BASE_TIME = datetime(2026, 7, 10, 8, 0, tzinfo=timezone(timedelta(hours=7)))
 DESTINATIONS = [
     ("Bekasi Timur", -6.2477, 107.0188), ("Rawalumbu", -6.2791, 107.0021),
     ("Tambun", -6.2572, 107.0667), ("Kemang", -6.2615, 106.8117),
@@ -74,7 +74,7 @@ def clear_tables() -> None:
         "route_candidates", "routes", "traffic_snapshots", "weather_snapshots", "gps_events", "hub_events",
         "loading_inspections", "delay_predictions", "sla_predictions", "carbon_estimates", "route_recommendations",
         "alerts", "maintenance_history", "breakdown_history", "maintenance_predictions", "simulation_events",
-        "simulation_state", "shipments", "drivers", "vehicles", "hubs", "model_registry", "synthetic_network_runs",
+        "simulation_state", "operational_clock", "shipments", "drivers", "vehicles", "hubs", "model_registry", "synthetic_network_runs",
     ]:
         repo.execute(f"DELETE FROM {table}")
 
@@ -117,6 +117,7 @@ def main(preset: str = "COMPACT_PRESENTATION") -> None:
         status = "Maintenance" if i % 29 == 0 else ("Idle" if i % 7 == 0 else "Active")
         vehicle_rows.append((vehicle_id_for(i + 1, vtype), vtype, cap_w, cap_v, fuel, eff, status, 9000 + i * 417, 7600 + i * 389, "2026-06-15"))
     repo.execute_many("INSERT INTO vehicles VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", vehicle_rows)
+    assignable_vehicle_rows = [row for row in vehicle_rows if row[6] == "Active"]
 
     driver_rows = []
     names = ["Raka", "Dimas", "Maya", "Andi", "Sari", "Bima", "Nadia", "Fajar", "Intan", "Rizky"]
@@ -142,7 +143,7 @@ def main(preset: str = "COMPACT_PRESENTATION") -> None:
         shipment_id = "SHP-1028" if is_hero else f"SHP-{2000 + i:05d}"
         origin = hubs[(i * 5 + 2) % len(hubs)]
         destination = DESTINATIONS[(i * 7 + 3) % len(DESTINATIONS)]
-        vehicle = hero_vehicle if is_hero else vehicle_rows[(i * 13 + 4) % len(vehicle_rows)][0]
+        vehicle = hero_vehicle if is_hero else assignable_vehicle_rows[(i * 13 + 4) % len(assignable_vehicle_rows)][0]
         vtype = next(v[1] for v in vehicle_rows if v[0] == vehicle)
         base_weight = {"motorcycle": 12, "van": 180, "electric_van": 150, "box_truck": 520}[vtype]
         load_weight = round(base_weight + (i % 17) * (4.5 if vtype == "motorcycle" else 23.5), 1)
@@ -208,6 +209,8 @@ def main(preset: str = "COMPACT_PRESENTATION") -> None:
     repo.execute_many("INSERT INTO simulation_events(event_id,step,timestamp,event_type,entity_id,payload_json,processed) VALUES(?,?,?,?,?,?,0)", [(e[0], e[1], e[2], e[3], e[4], json.dumps(e[5])) for e in events])
     repo.execute("INSERT OR REPLACE INTO simulation_state(id,current_step,status,current_timestamp,active_shipment_id) VALUES(1,0,'Paused',?,'SHP-1028')", (iso(),))
 
+    repo.execute("INSERT OR REPLACE INTO operational_clock(runtime_id,timezone,current_demo_time,wall_clock_reference,status,speed_multiplier,last_tick_at,state_version) VALUES(?,?,?,?,?,?,?,?)", ("DEMO-RUNTIME-20260710", "Asia/Jakarta", iso(392), None, "RUNNING", 5, iso(392), 1))
+
     model_rows = [
         ("PackageDamagePrototypeEngine", "v1", "prototype_visual_signal", "models/package_damage_yolo.pt", "team image dataset required", 0, json.dumps(["crushed_box", "torn_corner", "wet_label"]), json.dumps({"mode": "deterministic demo", "precision": "not trained"}), "DEMO_MODE", "YOLO artifact optional; deterministic fallback active", iso()),
         ("HubOccupancyPrototypeEngine", "v1", "prototype_visual_signal", "models/hub_occupancy_yolo.pt", "hub frame dataset required", 0, json.dumps(["package", "pallet", "worker", "occupied_zone"]), json.dumps({"mode": "density heuristic", "accuracy": "prototype"}), "DEMO_MODE", "Visual density fallback active", iso()),
@@ -215,6 +218,29 @@ def main(preset: str = "COMPACT_PRESENTATION") -> None:
         ("VisionLoadingValidationEngine", "v1", "prototype_validation", "models/loading_validation.pt", "dock image + shipment plan", 0, json.dumps(["planned_vehicle_id", "observed_vehicle_id", "package_scan"]), json.dumps({"mode": "plan reconciliation"}), "DEMO_MODE", "Shipment-plan validation fallback active", iso()),
     ]
     repo.execute_many("INSERT OR REPLACE INTO model_registry(name,version,model_type,file_path,dataset_type,training_rows,feature_names_json,metrics_json,availability,fallback_state,training_timestamp) VALUES(?,?,?,?,?,?,?,?,?,?,?)", model_rows)
+    for i in range(24):
+        sid = "SHP-1028" if i == 0 else f"SHP-{2001 + i:05d}"
+        intervention_id = f"HIST-ROUTE-{i+1:03d}"
+        before_distance = round(34 + (i % 9) * 3.4, 2)
+        after_distance = round(before_distance - (1.2 + (i % 5) * 0.7), 2)
+        is_ev_impact = i % 5 == 0
+        before_fuel = 0 if is_ev_impact else round(before_distance / 10.8, 3)
+        after_fuel = 0 if is_ev_impact else round(after_distance / 11.3, 3)
+        before_energy = round(before_distance * 0.19, 3) if is_ev_impact else 0
+        after_energy = round(after_distance * 0.17, 3) if is_ev_impact else 0
+        before_co2 = round(before_energy * 0.82 if is_ev_impact else before_fuel * 2.68, 3)
+        after_co2 = round(after_energy * 0.82 if is_ev_impact else after_fuel * 2.68, 3)
+        before_delay = 38 + (i % 8) * 6
+        after_delay = max(8, before_delay - (7 + (i % 6) * 3))
+        before_sla = round(0.48 + (i % 7) * 0.055, 3)
+        after_sla = round(max(0.08, before_sla - (0.11 + (i % 5) * 0.025)), 3)
+        before = {"distance_km": before_distance, "fuel_liter": before_fuel, "energy_kwh": before_energy, "co2_kg": before_co2, "delay_min": before_delay, "sla_probability": before_sla}
+        after = {"distance_km": after_distance, "fuel_liter": after_fuel, "energy_kwh": after_energy, "co2_kg": after_co2, "delay_min": after_delay, "sla_probability": after_sla}
+        impact = {"expected_delay_change_min": round(after_delay - before_delay, 1), "actual_reforecast_delay_change_min": round(after_delay - before_delay, 1), "expected_sla_change_pp": round((after_sla - before_sla) * 100, 2), "actual_reforecast_sla_change_pp": round((after_sla - before_sla) * 100, 2), "expected_co2_change_kg": round(after_co2 - before_co2, 3), "actual_reforecast_co2_change_kg": round(after_co2 - before_co2, 3), "status": "IMPROVED", "evidence": {"before": before, "after": after, "methodology": "synthetic completed intervention replay"}}
+        completed_at = iso(20 + i * 11)
+        repo.execute("INSERT OR REPLACE INTO operational_interventions(intervention_id,shipment_id,journey_id,journey_leg_id,hub_id,vehicle_id,intervention_type,trigger_type,trigger_event_id,severity,status,recommended_action,recommended_entity_id,reason,primary_factor,evidence_json,before_state_json,expected_after_state_json,actual_after_state_json,decision_policy,accepted_at,executed_at,completed_at,impact_json,is_simulated,scenario_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (intervention_id, sid, f"JRN-{sid}", None, None, None, "ROUTE_REOPTIMIZATION", "HISTORICAL_TRAFFIC_PRESSURE", f"HIST-EVT-{i+1:03d}", "High" if before_sla > .7 else "Warning", "COMPLETED", "Apply lower-risk route candidate.", "Balanced AI", "Historical route intervention reduced time, carbon, and SLA exposure.", "Traffic pressure and SLA buffer changed materially.", json.dumps({"before": before, "after": after}), json.dumps(before), json.dumps(after), json.dumps(after), "AUTOMATED_DEMO_POLICY_V1", completed_at, completed_at, completed_at, json.dumps(impact), 1, "COMPACT_HISTORY"))
+        repo.execute("INSERT OR REPLACE INTO intervention_impacts(impact_id,intervention_id,shipment_id,expected_delay_change_min,actual_reforecast_delay_change_min,expected_sla_change_pp,actual_reforecast_sla_change_pp,expected_co2_change_kg,actual_reforecast_co2_change_kg,status,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (f"IMP-{intervention_id}", intervention_id, sid, impact["expected_delay_change_min"], impact["actual_reforecast_delay_change_min"], impact["expected_sla_change_pp"], impact["actual_reforecast_sla_change_pp"], impact["expected_co2_change_kg"], impact["actual_reforecast_co2_change_kg"], "IMPROVED", json.dumps(impact["evidence"])))
+
     assumptions = {"preset": preset, "deterministic_seed": 42, "geography": "Synthetic Jabodetabek logistics network", "event_count_note": "Operational events are represented by traffic, weather, GPS, hub, route, signal, and hero simulation records."}
     repo.execute("INSERT INTO synthetic_network_runs(run_id,preset,shipment_count,hub_count,vehicle_count,driver_count,routing_job_count,operational_event_count,assumptions_json) VALUES(?,?,?,?,?,?,?,?,?)", ("RUN-COMPACT-20260705", preset, cfg["shipments"], cfg["hubs"], cfg["vehicles"], cfg["drivers"], cfg["routing_jobs"], cfg["events"], json.dumps(assumptions)))
     Path("data/demo/demo_manifest.json").write_text(json.dumps({"synthetic": True, "scenario": "SHP-1028", "preset": preset, **cfg}, indent=2), encoding="utf-8")

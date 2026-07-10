@@ -25,6 +25,7 @@ export const api = {
   vehiclesPaged: (params = {}) => request(`/api/vehicles/paged?${new URLSearchParams(params)}`),
   drivers: (params = {}) => request(`/api/drivers?${new URLSearchParams(params)}`),
   networkSummary: () => request("/api/network/summary"),
+  clock: () => request("/api/clock"),
   hubs: () => request("/api/hubs"),
   risk: (shipmentId) => request(`/api/risk/predict/${shipmentId}`, { method: "POST" }),
   riskHistory: (shipmentId) => request(`/api/risk/history/${shipmentId}`),
