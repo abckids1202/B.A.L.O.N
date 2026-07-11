@@ -1326,17 +1326,21 @@ function useLiveCvState(mode) {
     api.cvState()
       .then((data) => active && setState((current) => ({ ...current, loading: false, data, events: data.recent_events || [] })))
       .catch((error) => active && setState((current) => ({ ...current, loading: false, error: error.message })));
-    const source = new EventSource(`${api.base}/api/cv/events/stream`);
-    source.addEventListener("cv_event", (event) => {
-      const item = JSON.parse(event.data);
-      if (!active) return;
+    const pushEvent = (item) => {
+      if (!active || !item?.event_id) return;
       setState((current) => ({ ...current, data: { ...(current.data || {}), latest_event: item }, events: [item, ...(current.events || []).filter((row) => row.event_id !== item.event_id)].slice(0, 12) }));
-    });
+    };
+    const source = new EventSource(`${api.base}/api/cv/events/stream`);
+    source.addEventListener("cv_event", (event) => pushEvent(JSON.parse(event.data)));
     source.onerror = () => {
       if (active) setState((current) => ({ ...current, error: current.error || "Live CV stream is reconnecting" }));
     };
+    const poller = setInterval(() => {
+      api.cvEvents(1).then((items) => pushEvent(items?.[0])).catch(() => {});
+    }, 2500);
     return () => {
       active = false;
+      clearInterval(poller);
       source.close();
     };
   }, [mode]);
@@ -1349,11 +1353,13 @@ function LiveCVWorkspace({ mode, scenario, title }) {
   const [worker, setWorker] = useState({ loading: true, ok: false, data: null });
   useEffect(() => {
     let active = true;
-    fetch("http://127.0.0.1:8765/health")
+    const load = () => fetch("http://127.0.0.1:8765/health")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("worker offline")))
       .then((data) => active && setWorker({ loading: false, ok: true, data }))
       .catch(() => active && setWorker({ loading: false, ok: false, data: null }));
-    return () => { active = false; };
+    load();
+    const timer = setInterval(load, 2500);
+    return () => { active = false; clearInterval(timer); };
   }, [mode]);
   async function replay() {
     setBusy(true);
@@ -1365,28 +1371,41 @@ function LiveCVWorkspace({ mode, scenario, title }) {
     }
   }
   const latest = live.events?.[0] || live.data?.latest_event;
+  const payload = latest?.payload || {};
+  const decision = latest?.operational_signal_id ? "Backend processed material event" : "Waiting for material CV event";
   return (
     <Panel title={title || "Local CV Demo Runtime"} icon={Activity}>
-      <div className="cv-live-grid">
-        <div className="cv-video-panel">
-          {worker.ok ? <img src="http://127.0.0.1:8765/stream" alt="Local CV worker stream" /> : <div><b>LOCAL CV WORKER OFFLINE</b><span>Start it with python -m cv_worker.main, or use replay mode.</span></div>}
-        </div>
-        <div className="cv-status-panel">
-          <div className="detail-table-mini">
-            <span><b>Worker</b>{worker.ok ? "ONLINE" : "OFFLINE"}</span>
-            <span><b>Backend ingest</b>{live.data?.backend_ingestion || "ONLINE"}</span>
-            <span><b>Mode</b>{worker.data?.active_mode || mode}</span>
-            <span><b>Camera</b>{worker.data?.camera_status || "not connected"}</span>
-            <span><b>Package model</b>{worker.data?.package_model_status || "weights missing"}</span>
-            <span><b>Damage model</b>{worker.data?.damage_model_status || "weights missing"}</span>
-            <span><b>FPS</b>{worker.data?.camera_fps ? `${worker.data.camera_fps.toFixed(1)} camera / ${worker.data.inference_fps.toFixed(1)} inference` : "N/A"}</span>
-            <span><b>Last event</b>{latest ? `${latest.event_type} (${latest.severity})` : "none yet"}</span>
-          </div>
-          <div className="control-row">
-            <Button onClick={replay} busy={busy}>Run Replay</Button>
-            <a className="button secondary" href="http://127.0.0.1:8765/docs" target="_blank" rel="noreferrer">Worker API</a>
-          </div>
-        </div>
+      <div className="cv-compact-grid">
+        <article className="cv-health-card">
+          <b>LOCAL WORKER</b>
+          <span>{worker.ok ? "ONLINE" : "OFFLINE"}</span>
+          <small>{worker.ok ? `${worker.data?.active_mode || mode} / ${worker.data?.camera_status || "camera unknown"}` : "Start python -m cv_worker.main --camera-index 0"}</small>
+          <small>Delivery: {worker.data?.delivery_status || "N/A"} / Queue: {worker.data?.pending_events ?? 0}</small>
+        </article>
+        <article className="cv-health-card">
+          <b>MODELS</b>
+          <span>{worker.data?.package_model_status || "weights missing"}</span>
+          <small>Package detector</small>
+          <span>{worker.data?.damage_model_status || "weights missing"}</span>
+          <small>Damage detector</small>
+        </article>
+        <article className="cv-health-card">
+          <b>DETECTION</b>
+          <span>{latest ? latest.event_type.replaceAll("_", " ") : "No event yet"}</span>
+          <small>{latest ? `${latest.shipment_id || latest.vehicle_id || latest.hub_id || "network"} / ${formatPercent(latest.confidence)}` : "Press E in the local CV window"}</small>
+          <small>{payload.damage_type || payload.qr_payload || payload.current_count || payload.queue_length || "Awaiting real signal"}</small>
+        </article>
+        <article className="cv-health-card">
+          <b>DECISION - IMPACT</b>
+          <span>{decision}</span>
+          <small>{latest ? `${latest.severity} / ${formatTimeWib(latest.observed_at)}` : "SSE updates this panel without refresh"}</small>
+          <small>{live.error || live.data?.backend_ingestion || "Backend stream ready"}</small>
+        </article>
+      </div>
+      <div className="control-row cv-control-row">
+        <Button onClick={replay} busy={busy}>Run Replay</Button>
+        <a className="button secondary" href="http://127.0.0.1:8765/docs" target="_blank" rel="noreferrer">Worker API</a>
+        <a className="button secondary" href="http://127.0.0.1:8765/stream" target="_blank" rel="noreferrer">Optional Local Stream</a>
       </div>
       <div className="cv-event-strip">
         {(live.events || []).slice(0, 6).map((event) => (

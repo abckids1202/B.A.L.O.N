@@ -185,6 +185,11 @@ def cv_events(limit: int = 80):
     return core.cv_events(limit)
 
 
+@router.get("/cv/demo-packages/{shipment_id}")
+def cv_demo_package(shipment_id: str):
+    return handle(core.cv_demo_package_lookup, shipment_id)
+
+
 @router.get("/cv/events/stream")
 async def cv_event_stream():
     async def events():
@@ -194,11 +199,11 @@ async def cv_event_stream():
             latest = state.get("latest_event")
             if latest and latest.get("event_id") != last_id:
                 last_id = latest["event_id"]
-                yield f"event: cv_event\\ndata: {repo.jdump(latest)}\\n\\n"
+                yield f"event: cv_event\ndata: {repo.jdump(latest)}\n\n"
             else:
-                yield f"event: heartbeat\\ndata: {repo.jdump({'status': 'ok', 'time': core.now_iso()})}\\n\\n"
+                yield f"event: heartbeat\ndata: {repo.jdump({'status': 'ok', 'time': core.now_iso()})}\n\n"
             await asyncio.sleep(1)
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 @router.get("/cv/events/{event_id}")

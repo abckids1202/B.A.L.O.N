@@ -1,0 +1,42 @@
+[
+  {
+    "shipment_id": "SHP-DMG-001",
+    "package_id": "PKG-DMG-001",
+    "file": "data\\demo_qr\\SHP-DMG-001.png",
+    "payload": {
+      "shipment_id": "SHP-DMG-001",
+      "package_id": "PKG-DMG-001",
+      "version": 1
+    }
+  },
+  {
+    "shipment_id": "SHP-HUB-001",
+    "package_id": "PKG-HUB-001",
+    "file": "data\\demo_qr\\SHP-HUB-001.png",
+    "payload": {
+      "shipment_id": "SHP-HUB-001",
+      "package_id": "PKG-HUB-001",
+      "version": 1
+    }
+  },
+  {
+    "shipment_id": "SHP-LOAD-001",
+    "package_id": "PKG-LOAD-001",
+    "file": "data\\demo_qr\\SHP-LOAD-001.png",
+    "payload": {
+      "shipment_id": "SHP-LOAD-001",
+      "package_id": "PKG-LOAD-001",
+      "version": 1
+    }
+  },
+  {
+    "shipment_id": "SHP-LOAD-002",
+    "package_id": "PKG-LOAD-002",
+    "file": "data\\demo_qr\\SHP-LOAD-002.png",
+    "payload": {
+      "shipment_id": "SHP-LOAD-002",
+      "package_id": "PKG-LOAD-002",
+      "version": 1
+    }
+  }
+]

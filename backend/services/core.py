@@ -406,7 +406,10 @@ def process_package_damage_signal(shipment_id: str, filename: str = "demo-damage
         "affected_engines": ["Delay prediction", "SLA risk prediction", "Decision Engine", "Package Digital Twin"],
     }
     signal = _persist_signal("PACKAGE_DAMAGE_RISK_DETECTED", "PackageDamagePrototypeEngine", "SHIPMENT", shipment_id, severity, damage_probability, payload, state_change, "PrototypeDamageSignalEngine:v1", shipment_id=shipment_id, hub_id=shipment.get("origin_hub"))
-    risk = predict_risk(shipment_id)
+    try:
+        risk = predict_risk(shipment_id)
+    except Exception as exc:
+        risk = {"shipment_id": shipment_id, "fallback": True, "risk_score": confidence, "error": str(exc)}
     intervention = _create_signal_intervention(
         signal,
         "PACKAGE_INSPECTION",
@@ -536,7 +539,10 @@ def process_wrong_loading_signal(shipment_id: str, observed_vehicle_id: str | No
         "affected_engines": ["Package Digital Twin", "Delay prediction", "Decision Engine", "Route Planning"],
     }
     signal = _persist_signal("WRONG_PACKAGE_LOADING_DETECTED", "VisionLoadingValidationEngine", "SHIPMENT", shipment_id, severity, confidence, payload, state_change, "PrototypeLoadingValidationEngine:v1", shipment_id=shipment_id, hub_id=shipment.get("origin_hub"))
-    risk = predict_risk(shipment_id)
+    try:
+        risk = predict_risk(shipment_id)
+    except Exception as exc:
+        risk = {"shipment_id": shipment_id, "fallback": True, "risk_score": confidence, "error": str(exc)}
     intervention = _create_signal_intervention(
         signal,
         "PACKAGE_LOADING_CORRECTION",
@@ -629,6 +635,38 @@ def package_qr_identity_context(shipment_id: str = "SHP-1028") -> dict:
         },
         "decoder": "cv2.QRCodeDetector.detectAndDecode(frame) or pyzbar.decode(crop)",
         "database_is_source_of_truth": True,
+    }
+
+
+def cv_demo_package_lookup(shipment_id: str) -> dict:
+    initialize_database()
+    demo = repo.row("SELECT * FROM cv_demo_packages WHERE shipment_id=?", (shipment_id,))
+    if demo:
+        route = repo.row("SELECT * FROM cv_demo_routing_jobs WHERE routing_job_id=?", (demo.get("routing_job_id"),))
+        return {
+            "shipment_id": demo.get("shipment_id"),
+            "package_id": demo.get("package_id"),
+            "priority": demo.get("priority"),
+            "origin_hub": demo.get("origin_hub"),
+            "destination_hub": demo.get("destination_hub"),
+            "planned_vehicle_id": demo.get("planned_vehicle_id"),
+            "planned_route_id": demo.get("planned_route_id"),
+            "routing_job_id": demo.get("routing_job_id"),
+            "current_stage": demo.get("current_stage"),
+            "sla_deadline": demo.get("sla_deadline"),
+            "route": route,
+            "source": "cv_demo_packages",
+        }
+    base = package_qr_identity_context(shipment_id)
+    contract = base["lookup_contract"]
+    return {
+        "shipment_id": shipment_id,
+        "package_id": base.get("package_id"),
+        "planned_vehicle_id": contract.get("planned_vehicle"),
+        "origin_hub": contract.get("origin_hub"),
+        "destination_hub": contract.get("destination_hub"),
+        "planned_route_id": contract.get("route"),
+        "source": "shipments",
     }
 
 

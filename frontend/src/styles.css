@@ -1181,3 +1181,43 @@ code { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 1180px) {
   .cv-live-grid, .cv-event-strip { grid-template-columns: 1fr; }
 }
+.cv-compact-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.cv-health-card {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 13px;
+  min-height: 132px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+.cv-health-card b {
+  color: #1d4ed8;
+  font-size: 12px;
+}
+.cv-health-card span {
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+  line-height: 1.15;
+}
+.cv-health-card small {
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+.cv-control-row {
+  margin-bottom: 12px;
+}
+@media (max-width: 1180px) {
+  .cv-compact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 880px) {
+  .cv-compact-grid { grid-template-columns: 1fr; }
+}
