@@ -131,6 +131,41 @@ def visual_demo_scenario():
     return core.run_visual_demo_scenario()
 
 
+@router.get("/visual-intelligence/assets")
+def visual_intelligence_assets():
+    return core.visual_asset_audit()
+
+
+@router.get("/visual-intelligence/summary")
+def visual_intelligence_summary():
+    return core.visual_intelligence_summary()
+
+
+@router.get("/visual-intelligence/qr-identity/{shipment_id}")
+def visual_intelligence_qr_identity(shipment_id: str):
+    return handle(core.package_qr_identity_context, shipment_id)
+
+
+@router.post("/visual-intelligence/package-quality")
+def visual_intelligence_package_quality(shipment_id: str = "SHP-1028"):
+    return handle(core.run_package_quality_workflow, shipment_id)
+
+
+@router.post("/visual-intelligence/dispatch-validation")
+def visual_intelligence_dispatch_validation(shipment_id: str = "SHP-1028", observed_vehicle_id: str | None = "VAN-044"):
+    return handle(core.run_dispatch_validation_workflow, shipment_id, observed_vehicle_id)
+
+
+@router.post("/visual-intelligence/loading-compliance")
+def visual_intelligence_loading_compliance(vehicle_id: str = "TRK-001", loaded_packages: int = 6, visual_capacity: int = 5):
+    return handle(core.run_loading_compliance_workflow, vehicle_id, loaded_packages, visual_capacity)
+
+
+@router.post("/visual-intelligence/hub-vision")
+def visual_intelligence_hub_vision(hub_id: str = "HUB-JKT", observed_packages: int | None = None):
+    return handle(core.run_hub_vision_workflow, hub_id, observed_packages)
+
+
 @router.post("/risk/predict/{shipment_id}")
 def risk_predict(shipment_id: str):
     return handle(core.predict_risk, shipment_id)

@@ -187,3 +187,35 @@ def test_marketing_analytics_business_views(client):
     assert marketing["hub_revenue_proxy"]
     assert marketing["top_order_hubs"][0]["orders"] > 0
     assert marketing["top_priority_drivers"][0]["business_score"] > 0
+
+def test_visual_intelligence_four_stage_workflows(client):
+    assets = client.get("/api/visual-intelligence/assets").json()
+    assert assets["wrong_loading_strategy"]["train_new_yolo"] is False
+    assert "label" in assets["package_and_label_detector"]["classes"]
+    assert "wet" in assets["damage_detector"]["classes"]
+
+    quality = client.post("/api/visual-intelligence/package-quality?shipment_id=SHP-1028").json()
+    assert quality["stage"] == "PACKAGE_ARRIVAL_QUALITY_GATE"
+    assert quality["signal"]["signal_type"] == "PACKAGE_DAMAGE_RISK_DETECTED"
+    assert quality["next_step"] == "QR Scan & Wrong Loading Detection"
+
+    dispatch = client.post("/api/visual-intelligence/dispatch-validation?shipment_id=SHP-1028&observed_vehicle_id=VAN-044").json()
+    assert dispatch["train_new_yolo"] is False
+    assert dispatch["qr_identity"]["qr_payload"] == "SHP-1028"
+    assert dispatch["dispatch_allowed"] is False
+    assert dispatch["status"] == "WRONG_LOADING"
+
+    loading = client.post("/api/visual-intelligence/loading-compliance?vehicle_id=TRK-001&loaded_packages=6&visual_capacity=5").json()
+    assert loading["stage"] == "LOADING_COMPLIANCE"
+    assert loading["dispatch_allowed"] is False
+    assert loading["visual_load_utilization_estimate"] > 1
+
+    hub = client.post("/api/visual-intelligence/hub-vision?hub_id=HUB-JKT&observed_packages=42").json()
+    assert hub["stage"] == "HUB_CONGESTION_DETECTION"
+    assert hub["tracking"]["engine"] == "supervision.ByteTrack"
+    assert len(hub["zones"]) == 4
+    assert hub["overflow_forecast"]["signal"]["signal_type"] == "HUB_OVERFLOW_RISK_FORECAST"
+
+    summary = client.get("/api/visual-intelligence/summary").json()
+    assert len(summary["chain"]) == 4
+    assert "ETA" in summary["operational_effect"]

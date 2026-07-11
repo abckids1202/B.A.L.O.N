@@ -57,5 +57,12 @@ export const api = {
   hubOccupancy: (hubId) => request(`/api/vision/hub-occupancy/${hubId}`, { method: "POST" }),
   hubOverflow: (hubId) => request(`/api/forecast/hub-overflow/${hubId}`, { method: "POST" }),
   loadingValidation: (shipmentId, observedVehicleId) => request(`/api/vision/loading-validation?shipment_id=${shipmentId}${observedVehicleId ? `&observed_vehicle_id=${observedVehicleId}` : ""}`, { method: "POST" }),
-  visualDemoScenario: () => request("/api/vision/demo-scenario", { method: "POST" })
+  visualDemoScenario: () => request("/api/vision/demo-scenario", { method: "POST" }),
+  visualAssets: () => request("/api/visual-intelligence/assets"),
+  visualSummary: () => request("/api/visual-intelligence/summary"),
+  qrIdentity: (shipmentId) => request(`/api/visual-intelligence/qr-identity/${shipmentId}`),
+  packageQuality: (shipmentId = "SHP-1028") => request(`/api/visual-intelligence/package-quality?shipment_id=${shipmentId}`, { method: "POST" }),
+  dispatchValidation: (shipmentId = "SHP-1028", observedVehicleId = "VAN-044") => request(`/api/visual-intelligence/dispatch-validation?shipment_id=${shipmentId}&observed_vehicle_id=${observedVehicleId}`, { method: "POST" }),
+  loadingCompliance: (vehicleId = "TRK-001", loadedPackages = 6, visualCapacity = 5) => request(`/api/visual-intelligence/loading-compliance?vehicle_id=${vehicleId}&loaded_packages=${loadedPackages}&visual_capacity=${visualCapacity}`, { method: "POST" }),
+  hubVision: (hubId = "HUB-JKT", observedPackages) => request(`/api/visual-intelligence/hub-vision?hub_id=${hubId}${observedPackages ? `&observed_packages=${observedPackages}` : ""}`, { method: "POST" })
 };

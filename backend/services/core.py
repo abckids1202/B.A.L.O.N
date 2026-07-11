@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -560,6 +561,228 @@ def run_visual_demo_scenario() -> dict:
     }
 
 
+def _repo_asset_counts(root_name: str) -> dict:
+    root = Path(__file__).resolve().parents[2] / root_name
+    data_yaml = root / "data.yaml"
+    names: list[str] = []
+    if data_yaml.exists():
+        for line in data_yaml.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip().startswith("names:"):
+                raw = line.split(":", 1)[1].strip()
+                try:
+                    names = list(json.loads(raw.replace("'", '"')))
+                except Exception:
+                    names = [item.strip(" '\"") for item in raw.strip("[]").split(",") if item.strip()]
+    splits: dict[str, dict[str, int]] = {}
+    for split in ["train", "valid", "test"]:
+        image_dir = root / split / "images"
+        label_dir = root / split / "labels"
+        splits[split] = {
+            "images": len([p for p in image_dir.glob("*") if p.is_file()]) if image_dir.exists() else 0,
+            "labels": len([p for p in label_dir.glob("*.txt")]) if label_dir.exists() else 0,
+        }
+    return {
+        "name": root_name,
+        "exists": root.exists(),
+        "data_yaml": str(data_yaml) if data_yaml.exists() else None,
+        "classes": names,
+        "class_count": len(names),
+        "splits": splits,
+        "weights_found": len(list(root.rglob("*.pt"))) + len(list(root.rglob("*.onnx"))),
+    }
+
+
+def visual_asset_audit() -> dict:
+    package = _repo_asset_counts("Package and label detection.v4i.yolov11")
+    damage = _repo_asset_counts("Parcel Damage Detection.v2-roboflow-instant-2--eval-.yolov11")
+    return {
+        "model_family": "YOLO11-compatible dataset assets with deterministic demo services",
+        "package_and_label_detector": package,
+        "damage_detector": damage,
+        "wrong_loading_strategy": {
+            "train_new_yolo": False,
+            "components": ["package detector", "label or QR crop", "OpenCV QRCodeDetector or pyzbar", "backend shipment lookup"],
+            "identity_payload": "shipment_id only; vehicle, hub, SLA, and route context are loaded from the backend",
+        },
+        "hub_congestion_strategy": {
+            "train_new_detector": False,
+            "components": ["package detector", "supervision.ByteTrack", "fixed hub zone polygons", "dwell and queue counters", "overflow forecast"],
+        },
+    }
+
+
+def package_qr_identity_context(shipment_id: str = "SHP-1028") -> dict:
+    shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (shipment_id,))
+    if not shipment:
+        raise ValueError(f"Unknown shipment {shipment_id}")
+    route = repo.row("SELECT * FROM routes WHERE shipment_id=? AND is_current=1", (shipment_id,))
+    return {
+        "qr_payload": shipment_id,
+        "package_id": f"PKG-{shipment_id.split('-')[-1]}",
+        "lookup_contract": {
+            "shipment": shipment_id,
+            "planned_vehicle": shipment.get("vehicle_id"),
+            "origin_hub": shipment.get("origin_hub"),
+            "destination_hub": shipment.get("destination_hub"),
+            "route": route.get("route_id") if route else None,
+        },
+        "decoder": "cv2.QRCodeDetector.detectAndDecode(frame) or pyzbar.decode(crop)",
+        "database_is_source_of_truth": True,
+    }
+
+
+def visual_intelligence_summary() -> dict:
+    signals = list_operational_signals(limit=200)
+    return {
+        "chain": [
+            {"step": 1, "name": "Package Damage Detection", "model": "Parcel Damage YOLO", "updates": ["quality hold", "SLA risk", "dashboard"]},
+            {"step": 2, "name": "QR Scan & Wrong Loading Detection", "model": "Package/Label YOLO + QR decoder + database", "updates": ["dispatch block", "vehicle assignment", "route context"]},
+            {"step": 3, "name": "Loading Compliance", "model": "Package/Label YOLO + tracking + dock ROI", "updates": ["load utilization", "dispatch release", "manual correction"]},
+            {"step": 4, "name": "Hub Congestion Detection", "model": "Package YOLO + ByteTrack + zone dwell", "updates": ["queue length", "hub dwell", "overflow forecast"]},
+        ],
+        "assets": visual_asset_audit(),
+        "qr_identity": package_qr_identity_context("SHP-1028"),
+        "signal_counts": count_by_signal_type(signals),
+        "signal_severity": count_by_signal_severity(signals),
+        "latest_signals": signals[:8],
+        "operational_effect": "Visual observations become normalized operational signals, then update ETA, SLA risk, routing, interventions, digital twins, and analytics.",
+    }
+
+
+def run_package_quality_workflow(shipment_id: str = "SHP-1028") -> dict:
+    result = process_package_damage_signal(shipment_id)
+    signal = result["signal"]
+    detections = signal["normalized_payload"].get("detections", [])
+    return {
+        "stage": "PACKAGE_ARRIVAL_QUALITY_GATE",
+        "model": "Model A - Package Vision / Parcel Damage YOLO",
+        "asset": visual_asset_audit()["damage_detector"],
+        "shipment_id": shipment_id,
+        "detections": detections,
+        "damage_classes": visual_asset_audit()["damage_detector"]["classes"],
+        "decision": "INSPECTION_HOLD" if signal["severity"] in {"Critical", "Warning"} else "CLEAR_TO_SCAN",
+        "quality_risk_score": signal["confidence"],
+        "signal": signal,
+        "risk": result["risk"],
+        "intervention": result["intervention"],
+        "next_step": "QR Scan & Wrong Loading Detection",
+    }
+
+
+def run_dispatch_validation_workflow(shipment_id: str = "SHP-1028", observed_vehicle_id: str | None = "VAN-044") -> dict:
+    identity = package_qr_identity_context(shipment_id)
+    result = process_wrong_loading_signal(shipment_id, observed_vehicle_id)
+    signal = result["signal"]
+    payload = signal["normalized_payload"]
+    status = "WRONG_LOADING" if payload.get("mismatch") else "VALID_LOADING"
+    return {
+        "stage": "QR_SCAN_AND_WRONG_LOADING_DETECTION",
+        "model": "Model A - Package/Label YOLO reused with QR decoder and shipment database",
+        "train_new_yolo": False,
+        "pipeline": ["detect package", "crop label or QR region", "decode QR", "lookup shipment plan", "compare observed vehicle"],
+        "qr_identity": identity,
+        "observed_vehicle_id": payload.get("observed_vehicle_id"),
+        "planned_vehicle_id": payload.get("planned_vehicle_id"),
+        "status": status,
+        "dispatch_allowed": not payload.get("mismatch"),
+        "action": "BLOCK_DISPATCH_AND_RELOAD" if payload.get("mismatch") else "RELEASE_TO_LOADING_COMPLIANCE",
+        "signal": signal,
+        "risk": result["risk"],
+        "intervention": result["intervention"],
+        "next_step": "Loading Compliance",
+    }
+
+
+def run_loading_compliance_workflow(vehicle_id: str = "TRK-001", loaded_packages: int = 6, visual_capacity: int = 5) -> dict:
+    if visual_capacity <= 0:
+        raise ValueError("visual_capacity must be positive")
+    vehicle = repo.row("SELECT * FROM vehicles WHERE vehicle_id=?", (vehicle_id,))
+    if not vehicle:
+        raise ValueError(f"Unknown vehicle {vehicle_id}")
+    utilization = min(1.18, loaded_packages / visual_capacity)
+    blocked = loaded_packages > visual_capacity or utilization >= 0.96
+    severity = "Warning" if blocked else "Info"
+    confidence = 0.86 if blocked else 0.62
+    payload = {
+        "vehicle_id": vehicle_id,
+        "loaded_packages": loaded_packages,
+        "visual_capacity": visual_capacity,
+        "visual_load_utilization_estimate": round(utilization, 3),
+        "roi_events": [
+            {"track_id": 7, "event": "entered_loading_roi", "timestamp": now_iso()},
+            {"track_id": 12, "event": "crossed_vehicle_threshold", "timestamp": now_iso()},
+            {"track_id": 18, "event": "inside_vehicle_roi", "timestamp": now_iso()},
+        ],
+        "prototype_assumption": "Counts package tracks crossing the vehicle ROI; it is a visual utilization estimate, not a scale weight.",
+    }
+    state_change = {
+        "before": {"dispatch_status": "WAITING_FOR_VISUAL_REVIEW", "loaded_packages": max(0, loaded_packages - 1)},
+        "after": {"dispatch_status": "BLOCKED" if blocked else "READY", "loaded_packages": loaded_packages, "visual_load_utilization_estimate": round(utilization, 3)},
+        "affected_engines": ["Dispatch validation", "Vehicle digital twin", "Decision Engine", "Dashboard"],
+    }
+    signal = _persist_signal(
+        "LOADING_COMPLIANCE_UPDATED",
+        "LoadingComplianceVisionEngine",
+        "VEHICLE",
+        vehicle_id,
+        severity,
+        confidence,
+        payload,
+        state_change,
+        "PrototypeLoadingComplianceEngine:v1",
+        hub_id=vehicle.get("home_hub") or "HUB-JKT",
+    )
+    intervention = _create_signal_intervention(
+        signal,
+        "LOADING_COMPLIANCE_REVIEW",
+        "Pause departure and remove excess package from the vehicle loading zone.",
+        "Visual package tracks exceeded the configured dock capacity gate.",
+        "Visual load utilization",
+        {"dispatch_blocked": blocked, "expected_delay_change_min": 5 if blocked else 0, "expected_sla_change_pp": 2.0 if blocked else 0},
+    )
+    return {
+        "stage": "LOADING_COMPLIANCE",
+        "model": "Model A - Package/Label YOLO + tracker + vehicle ROI",
+        "vehicle_id": vehicle_id,
+        "status": "BLOCKED" if blocked else "READY_FOR_DEPARTURE",
+        "dispatch_allowed": not blocked,
+        "visual_load_utilization_estimate": round(utilization, 3),
+        "loaded_packages": loaded_packages,
+        "visual_capacity": visual_capacity,
+        "signal": signal,
+        "intervention": intervention,
+        "next_step": "Vehicle departs, then Hub Congestion Detection",
+    }
+
+
+def run_hub_vision_workflow(hub_id: str = "HUB-JKT", observed_packages: int | None = None) -> dict:
+    occupancy = process_hub_occupancy_signal(hub_id, "queue", observed_packages)
+    forecast = forecast_hub_overflow_signal(hub_id, 90)
+    signal = occupancy["signal"]
+    queue = int(signal["normalized_payload"].get("observed_packages", 0))
+    zones = [
+        {"zone_id": "INBOUND", "polygon": [[0.04, 0.12], [0.34, 0.12], [0.34, 0.42], [0.04, 0.42]], "track_count": max(3, queue // 5), "avg_dwell_min": 9},
+        {"zone_id": "QUEUE", "polygon": [[0.38, 0.1], [0.66, 0.1], [0.66, 0.56], [0.38, 0.56]], "track_count": queue, "avg_dwell_min": signal["state_change"]["after"].get("average_dwell_time_min")},
+        {"zone_id": "SORTING", "polygon": [[0.08, 0.58], [0.48, 0.58], [0.48, 0.92], [0.08, 0.92]], "track_count": max(4, queue // 3), "avg_dwell_min": 18},
+        {"zone_id": "LOADING", "polygon": [[0.56, 0.58], [0.94, 0.58], [0.94, 0.92], [0.56, 0.92]], "track_count": max(2, queue // 6), "avg_dwell_min": 12},
+    ]
+    return {
+        "stage": "HUB_CONGESTION_DETECTION",
+        "model": "Model B - Hub Vision / Package YOLO + supervision ByteTrack",
+        "hub_id": hub_id,
+        "tracking": {"engine": "supervision.ByteTrack", "tracks_have_memory": True, "sample_track_ids": [7, 12, 18, 25]},
+        "zones": zones,
+        "queue_length": queue,
+        "congestion_state": signal["severity"],
+        "occupancy_ratio": signal["normalized_payload"].get("occupancy_ratio"),
+        "overflow_forecast": forecast,
+        "signal": signal,
+        "hub_analysis": occupancy["hub_analysis"],
+        "intervention": occupancy["intervention"],
+        "updates": ["ETA", "SLA risk", "routing", "dashboard", "capacity planning analytics"],
+    }
+
+
 def carbon_estimate(payload: dict) -> dict:
     vehicle = repo.row("SELECT * FROM vehicles WHERE vehicle_id=?", (payload["vehicle_id"],))
     shipment = repo.row("SELECT * FROM shipments WHERE shipment_id=?", (payload["shipment_id"],))
@@ -703,7 +926,7 @@ def simulation_next() -> dict:
     ts = event["timestamp"]
     event_type = event["event_type"]
     if event_type in {"ORIGIN_DISPATCHED", "HUB_DEPARTED", "LAST_MILE_STARTED"}:
-        vehicle_id = payload.get("vehicle_id", "VAN-021")
+        vehicle_id = payload.get("vehicle_id", "TRK-001")
         repo.execute(
             "INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)",
             ("SHP-1028", vehicle_id, payload.get("lat", -6.25), payload.get("lon", 106.99), payload.get("speed_kmh", 28), payload.get("route_deviation_count", 0), ts),
@@ -743,7 +966,7 @@ def simulation_next() -> dict:
     if event_type == "GPS_UPDATE":
         repo.execute(
             "INSERT INTO gps_events(shipment_id,vehicle_id,lat,lon,speed_kmh,route_deviation_count,captured_at) VALUES(?,?,?,?,?,?,?)",
-            ("SHP-1028", payload.get("vehicle_id", "VAN-021"), payload["lat"], payload["lon"], payload["speed_kmh"], payload["route_deviation_count"], ts),
+            ("SHP-1028", payload.get("vehicle_id", "TRK-001"), payload["lat"], payload["lon"], payload["speed_kmh"], payload["route_deviation_count"], ts),
         )
     if event_type == "HUB_ARRIVED":
         process_package_damage_signal("SHP-1028")

@@ -1,0 +1,7 @@
+# Optional local CV runtime
+
+opencv-python-headless
+pyzbar
+ultralytics
+supervision
+qrcode[pil]

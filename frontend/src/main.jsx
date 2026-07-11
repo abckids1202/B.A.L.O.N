@@ -23,6 +23,7 @@ import "./styles.css";
 
 const navSections = [
   { label: "Operations", items: [["Overview", Activity], ["Live Operations", Play], ["Package Tracking", PackageSearch], ["Package Reports", ClipboardList], ["Hub Operations", Network], ["Route Planning", Route]] },
+  { label: "Visual Intelligence", items: [["Package Quality", Boxes], ["Dispatch Validation", PackageSearch], ["Loading Compliance", Truck], ["Hub Vision", Network]] },
   { label: "Resources", items: [["Fleet & Vehicles", Truck], ["Analytics", BarChart3]] },
   { label: "System", items: [["Data, Models & Assumptions", Server]] }
 ];
@@ -70,7 +71,7 @@ function formatDateTimeWib(value, withSeconds = false) {
     hour12: false,
     timeZone: "Asia/Jakarta",
     timeZoneName: "short"
-  }).format(date).replace(",", " ·");
+  }).format(date).replace(",", " -");
 }
 
 function formatTimeWib(value, withSeconds = false) {
@@ -1315,6 +1316,216 @@ function PackageReports({ shared }) {
   );
 }
 
+
+
+function VisionStageFlow({ active = 1 }) {
+  const stages = ["Damage Detection", "QR + Wrong Loading", "Loading Compliance", "Hub Congestion", "AI Updates"];
+  return (
+    <div className="vision-flow">
+      {stages.map((stage, index) => (
+        <article key={stage} className={index + 1 <= active ? "active" : ""}>
+          <b>{String(index + 1).padStart(2, "0")}</b>
+          <span>{stage}</span>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ZoneMiniMap({ zones = [] }) {
+  return (
+    <div className="zone-map">
+      {zones.map((zone, index) => (
+        <article key={zone.zone_id} className={`zone-${index + 1}`}>
+          <b>{zone.zone_id}</b>
+          <span>{zone.track_count} tracks</span>
+          <small>{fmt(zone.avg_dwell_min, "m")} dwell</small>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function PackageQuality() {
+  const summary = useAsync(api.visualSummary, []);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function run() {
+    setBusy(true);
+    try { setResult(await api.packageQuality("SHP-1028")); } finally { setBusy(false); }
+  }
+  const classes = summary.data?.assets?.damage_detector?.classes || [];
+  const detections = result?.detections || [];
+  return (
+    <>
+      <Header title="Package Quality" description="Model A watches package arrival, detects possible damage, and writes a normalized signal before SLA, routing, and package twin decisions update." action={<Button onClick={run} busy={busy}>Run Quality Gate</Button>} />
+      <Status {...summary}>
+        <VisionStageFlow active={1} />
+        <div className="metrics-grid">
+          <Card label="Damage classes" value={classes.length || 0} detail={classes.join(", ") || "dataset not found"} />
+          <Card label="YOLO weights" value={summary.data?.assets?.damage_detector?.weights_found || 0} detail="Demo service remains deterministic until weights are exported" tone="orange" />
+          <Card label="Decision" value={result?.decision || "Ready"} detail={result?.next_step || "Run inspection"} tone={result?.decision === "INSPECTION_HOLD" ? "orange" : "green"} />
+          <Card label="Risk score" value={result ? formatPercent(result.quality_risk_score, 0) : "N/A"} />
+          <Card label="Signal" value={result?.signal?.severity || "Idle"} detail={result?.signal?.signal_type || "No event yet"} />
+        </div>
+        <div className="two-col">
+          <Panel title="Damage Detections" icon={PackageSearch}>
+            {detections.length ? <EntityTable columns={[
+              { key: "class_name", label: "Class" },
+              { key: "confidence", label: "Confidence", render: (row) => formatPercent(row.confidence) },
+              { key: "bbox", label: "Box", render: (row) => row.bbox.join(", ") }
+            ]} rows={detections.map((d, i) => ({ ...d, id: `${d.class_name}-${i}` }))} /> : <EmptyState>Run the quality gate to create a package damage observation.</EmptyState>}
+          </Panel>
+          <Panel title="Operational Impact" icon={Brain}>
+            <div className="method-list">
+              <p><b>Input:</b> parcel damage detector classes are {classes.join(", ") || "read from the local dataset"}.</p>
+              <p><b>Output:</b> quality hold, lower package compliance score, risk prediction refresh, and inspection intervention.</p>
+              <p><b>Disclosure:</b> demo mode produces deterministic visual signals until exported YOLO weights are connected.</p>
+            </div>
+          </Panel>
+        </div>
+      </Status>
+    </>
+  );
+}
+
+function DispatchValidation() {
+  const [result, setResult] = useState(null);
+  const [vehicleId, setVehicleId] = useState("VAN-044");
+  const [busy, setBusy] = useState(false);
+  async function scan() {
+    setBusy(true);
+    try { setResult(await api.dispatchValidation("SHP-1028", vehicleId)); } finally { setBusy(false); }
+  }
+  return (
+    <>
+      <Header title="Dispatch Validation" description="Wrong loading is not another detector. Package/label YOLO finds the label region, QR decoding reads the shipment ID, then the backend compares the planned vehicle." action={<Button onClick={scan} busy={busy}>Scan Demo QR</Button>} />
+      <VisionStageFlow active={2} />
+      <Panel title="QR Scan Workbench" icon={PackageSearch}>
+        <div className="control-grid">
+          <select value={vehicleId} onChange={(event) => setVehicleId(event.target.value)}>
+            <option value="VAN-044">VAN-044 wrong vehicle</option>
+            <option value="TRK-001">TRK-001 seeded vehicle</option>
+            <option value="MTR-002">MTR-002 alternate vehicle</option>
+          </select>
+          <Button onClick={scan} busy={busy}>Validate Loading</Button>
+        </div>
+      </Panel>
+      {result && (
+        <>
+          <div className="metrics-grid">
+            <Card label="QR payload" value={result.qr_identity.qr_payload} detail="Shipment ID only" />
+            <Card label="Planned vehicle" value={result.planned_vehicle_id} />
+            <Card label="Observed vehicle" value={result.observed_vehicle_id} />
+            <Card label="Status" value={result.status.replaceAll("_", " ")} tone={result.dispatch_allowed ? "green" : "red"} />
+            <Card label="New YOLO trained?" value={result.train_new_yolo ? "Yes" : "No"} detail="Detector + QR + DB" tone="green" />
+          </div>
+          <div className="two-col">
+            <Panel title="Validation Pipeline" icon={Network}>
+              <div className="vision-pipeline">{result.pipeline.map((step) => <span key={step}>{step}</span>)}</div>
+            </Panel>
+            <Panel title="Dispatch Action" icon={AlertTriangle}>
+              <div className="method-list">
+                <p><b>Action:</b> {result.action.replaceAll("_", " ")}</p>
+                <p><b>Backend lookup:</b> vehicle {result.qr_identity.lookup_contract.planned_vehicle}, hub {result.qr_identity.lookup_contract.origin_hub}, route {result.qr_identity.lookup_contract.route}</p>
+                <p><b>Intervention:</b> {result.intervention?.recommended_action || "No correction needed."}</p>
+              </div>
+            </Panel>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function LoadingCompliance() {
+  const [loaded, setLoaded] = useState(6);
+  const [capacity, setCapacity] = useState(5);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function run() {
+    setBusy(true);
+    try { setResult(await api.loadingCompliance("TRK-001", loaded, capacity)); } finally { setBusy(false); }
+  }
+  return (
+    <>
+      <Header title="Loading Compliance" description="Model A continues after QR validation: package tracks crossing the vehicle ROI estimate load utilization and block departure when the dock state is unsafe." action={<Button onClick={run} busy={busy}>Run Compliance Check</Button>} />
+      <VisionStageFlow active={3} />
+      <Panel title="Dock ROI Controls" icon={Truck}>
+        <div className="control-grid">
+          <select value={loaded} onChange={(event) => setLoaded(Number(event.target.value))}>{[4, 5, 6, 7].map((n) => <option key={n} value={n}>{n} loaded package tracks</option>)}</select>
+          <select value={capacity} onChange={(event) => setCapacity(Number(event.target.value))}>{[5, 6, 8].map((n) => <option key={n} value={n}>{n} visual capacity gate</option>)}</select>
+          <Button onClick={run} busy={busy}>Evaluate Vehicle ROI</Button>
+        </div>
+      </Panel>
+      {result && (
+        <>
+          <div className="metrics-grid">
+            <Card label="Vehicle" value={result.vehicle_id} />
+            <Card label="Loaded tracks" value={result.loaded_packages} />
+            <Card label="Visual capacity" value={result.visual_capacity} />
+            <Card label="Utilization" value={formatPercent(result.visual_load_utilization_estimate, 0)} tone={result.dispatch_allowed ? "green" : "orange"} />
+            <Card label="Dispatch" value={result.status.replaceAll("_", " ")} tone={result.dispatch_allowed ? "green" : "red"} />
+          </div>
+          <div className="viz-grid">
+            <GaugeCard label="Visual load utilization" value={Math.round(result.visual_load_utilization_estimate * 100)} max={120} unit="%" tone={result.dispatch_allowed ? "green" : "orange"} />
+            <HorizontalBars title="ROI Event Counts" data={(result.signal.normalized_payload.roi_events || []).map((event) => ({ label: event.event, value: 1 }))} color="#7c3aed" />
+            <div className="chart-card narrative"><h3>Compliance Meaning</h3><p>This is a computer-vision loading gate. It counts tracked package movement through configured dock and vehicle polygons.</p><p>It is not a true volume or weight measurement, so final production should reconcile vision with WMS and vehicle capacity records.</p></div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function HubVision() {
+  const [result, setResult] = useState(null);
+  const [hubId, setHubId] = useState("HUB-JKT");
+  const [busy, setBusy] = useState(false);
+  async function run() {
+    setBusy(true);
+    try { setResult(await api.hubVision(hubId, hubId === "HUB-JKT" ? 42 : 24)); } finally { setBusy(false); }
+  }
+  const zones = result?.zones || [];
+  return (
+    <>
+      <Header title="Hub Vision" description="Model B uses the package detector plus ByteTrack memory. Fixed hub zones convert anonymous package detections into queue length, dwell time, congestion state, and overflow forecasts." action={<Button onClick={run} busy={busy}>Run Hub Vision</Button>} />
+      <VisionStageFlow active={5} />
+      <Panel title="Hub Scenario" icon={Network}>
+        <div className="control-grid">
+          <select value={hubId} onChange={(event) => setHubId(event.target.value)}>
+            <option value="HUB-JKT">HUB-JKT high pressure</option>
+            <option value="HUB-BKS">HUB-BKS local hub</option>
+            <option value="HUB-TGR">HUB-TGR lower pressure</option>
+          </select>
+          <Button onClick={run} busy={busy}>Analyze Zones</Button>
+        </div>
+      </Panel>
+      {result && (
+        <>
+          <div className="metrics-grid">
+            <Card label="Hub" value={result.hub_id} />
+            <Card label="Queue length" value={result.queue_length} tone="orange" />
+            <Card label="Occupancy" value={formatPercent(result.occupancy_ratio, 0)} />
+            <Card label="Congestion" value={result.congestion_state} tone={riskTone(result.congestion_state)} />
+            <Card label="Overflow risk" value={formatPercent(result.overflow_forecast.signal.confidence, 0)} tone={riskTone(result.overflow_forecast.signal.severity)} />
+          </div>
+          <div className="two-col map-first">
+            <Panel title="Zone Monitor" icon={Map}><ZoneMiniMap zones={zones} /></Panel>
+            <Panel title="Tracking Contract" icon={Brain}><div className="method-list"><p><b>Tracker:</b> {result.tracking.engine}</p><p><b>Track IDs:</b> {result.tracking.sample_track_ids.join(", ")}</p><p><b>Updates:</b> {result.updates.join(", ")}</p></div></Panel>
+          </div>
+          <div className="viz-grid">
+            <HorizontalBars title="Zone Track Counts" data={zones.map((zone) => ({ label: zone.zone_id, value: zone.track_count }))} color="#2563eb" />
+            <BarChart title="Zone Dwell" data={zones.map((zone) => ({ label: zone.zone_id, value: zone.avg_dwell_min || 0 }))} unit="m" color="#f59e0b" />
+            <HorizontalBars title="Overflow Evidence" data={[{ label: "Current queue", value: result.overflow_forecast.signal.normalized_payload.current_queue_size }, { label: "Expected queue", value: result.overflow_forecast.signal.normalized_payload.expected_queue_size }, { label: "Horizon minutes", value: result.overflow_forecast.signal.normalized_payload.horizon_minutes }]} color="#dc2626" />
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+
 function Analytics() {
   const summary = useAsync(api.analytics, []);
   const hubRisk = useAsync(api.hubRisk, []);
@@ -1463,7 +1674,7 @@ function RoutePlanning({ shared }) {
 
 function Fleet({ shared }) {
   const fleet = useAsync(api.fleet, []);
-  const [vehicleId, setVehicleId] = useState(shared.vehicles[0]?.vehicle_id || "VAN-021");
+  const [vehicleId, setVehicleId] = useState(shared.vehicles[0]?.vehicle_id || "TRK-001");
   const [maintenance, setMaintenance] = useState(null);
   const [busy, setBusy] = useState(false);
   async function checkVehicle() {
@@ -1619,6 +1830,10 @@ function App() {
           {page === "Hub Operations" && <HubOperations shared={shared} />}
           {page === "Route Planning" && <RoutePlanning shared={shared} />}
           {page === "Fleet & Vehicles" && <Fleet shared={shared} />}
+          {page === "Package Quality" && <PackageQuality />}
+          {page === "Dispatch Validation" && <DispatchValidation />}
+          {page === "Loading Compliance" && <LoadingCompliance />}
+          {page === "Hub Vision" && <HubVision />}
           {page === "Analytics" && <Analytics />}
           {page === "Data, Models & Assumptions" && <DataModels />}
         </Status>
