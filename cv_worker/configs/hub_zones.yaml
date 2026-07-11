@@ -1,0 +1,6 @@
+zones:
+  - id: INBOUND
+  - id: QUEUE
+  - id: SORTING
+  - id: LOADING
+  - id: OUTBOUND

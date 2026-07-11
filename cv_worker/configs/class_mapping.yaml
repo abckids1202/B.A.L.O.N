@@ -1,0 +1,10 @@
+package:
+  package: PACKAGE
+  label: SHIPPING_LABEL
+damage:
+  crushed: CRUSHED_AREA
+  dirt: COSMETIC_CONTAMINATION
+  puncture: PUNCTURE
+  tear: TEAR
+  torn: TEAR
+  wet: WET_AREA

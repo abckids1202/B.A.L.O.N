@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -219,3 +220,25 @@ def test_visual_intelligence_four_stage_workflows(client):
     summary = client.get("/api/visual-intelligence/summary").json()
     assert len(summary["chain"]) == 4
     assert "ETA" in summary["operational_effect"]
+
+def test_cv_event_ingestion_and_replay(client):
+    event = {
+        "event_id": f"CVE-TEST-PACKAGE-DAMAGE-{uuid4().hex[:8]}",
+        "event_type": "PACKAGE_DAMAGE_DETECTED",
+        "module": "PACKAGE_QUALITY",
+        "source": "TEST",
+        "shipment_id": "SHP-1028",
+        "confidence": 0.9,
+        "severity": "HIGH",
+        "payload": {"damage_type": "crushed"},
+    }
+    created = client.post("/api/cv/events", json=event).json()
+    assert created["accepted"] is True
+    assert created["duplicate"] is False
+    duplicate = client.post("/api/cv/events", json=event).json()
+    assert duplicate["duplicate"] is True
+    state = client.get("/api/cv/state").json()
+    assert state["event_count"] >= 1
+    replay = client.post("/api/cv/demo-replay?scenario=HUB_CONGESTION").json()
+    assert replay["events_sent"] == 1
+    assert replay["results"][0]["accepted"] is True

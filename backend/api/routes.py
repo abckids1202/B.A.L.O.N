@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+import asyncio
+
+from fastapi import APIRouter, Body, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+from database import repositories as repo
 
 from backend.schemas.api import CarbonEstimateRequest, RouteOptimizeRequest
 from backend.services import core
@@ -164,6 +168,47 @@ def visual_intelligence_loading_compliance(vehicle_id: str = "TRK-001", loaded_p
 @router.post("/visual-intelligence/hub-vision")
 def visual_intelligence_hub_vision(hub_id: str = "HUB-JKT", observed_packages: int | None = None):
     return handle(core.run_hub_vision_workflow, hub_id, observed_packages)
+
+
+@router.post("/cv/events")
+def cv_event_ingest(event: dict = Body(...)):
+    return handle(core.ingest_cv_event, event)
+
+
+@router.get("/cv/state")
+def cv_state():
+    return core.cv_state()
+
+
+@router.get("/cv/events")
+def cv_events(limit: int = 80):
+    return core.cv_events(limit)
+
+
+@router.get("/cv/events/stream")
+async def cv_event_stream():
+    async def events():
+        last_id = None
+        while True:
+            state = core.cv_state()
+            latest = state.get("latest_event")
+            if latest and latest.get("event_id") != last_id:
+                last_id = latest["event_id"]
+                yield f"event: cv_event\\ndata: {repo.jdump(latest)}\\n\\n"
+            else:
+                yield f"event: heartbeat\\ndata: {repo.jdump({'status': 'ok', 'time': core.now_iso()})}\\n\\n"
+            await asyncio.sleep(1)
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@router.get("/cv/events/{event_id}")
+def cv_event(event_id: str):
+    return handle(core.cv_event, event_id)
+
+
+@router.post("/cv/demo-replay")
+def cv_demo_replay(scenario: str = "ALL"):
+    return handle(core.replay_cv_scenario, scenario)
 
 
 @router.post("/risk/predict/{shipment_id}")

@@ -159,4 +159,23 @@ CREATE INDEX IF NOT EXISTS idx_interventions_shipment ON operational_interventio
 CREATE INDEX IF NOT EXISTS idx_operational_signals_entity ON operational_signals(entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_operational_signals_shipment ON operational_signals(shipment_id, signal_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_operational_signals_hub ON operational_signals(hub_id, signal_type, created_at);
+
+CREATE TABLE IF NOT EXISTS cv_observations (
+  event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, module TEXT NOT NULL,
+  source TEXT NOT NULL, camera_id TEXT, observed_at TEXT NOT NULL, demo_time TEXT,
+  shipment_id TEXT, package_id TEXT, hub_id TEXT, vehicle_id TEXT,
+  confidence REAL NOT NULL, severity TEXT NOT NULL, model_name TEXT,
+  model_version TEXT, processing_time_ms REAL, payload_json TEXT NOT NULL,
+  operational_signal_id TEXT, processing_status TEXT NOT NULL,
+  duplicate_count INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS cv_runtime_sessions (
+  session_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
+  source_type TEXT, camera_id TEXT, active_mode TEXT, model_versions_json TEXT,
+  demo_mode INTEGER DEFAULT 1, worker_version TEXT, events_emitted INTEGER DEFAULT 0,
+  frames_processed INTEGER DEFAULT 0, average_inference_ms REAL DEFAULT 0,
+  status TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_cv_observations_type ON cv_observations(event_type, observed_at);
+CREATE INDEX IF NOT EXISTS idx_cv_observations_entity ON cv_observations(shipment_id, hub_id, vehicle_id, observed_at);
 '''

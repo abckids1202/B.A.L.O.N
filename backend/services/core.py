@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from database import repositories as repo
+from database.connection import initialize_database
 from modules.delivery_risk.features import build_features, factor_text, risk_level
 from modules.hub_risk.analyzer import analyze_hub
 from modules.fleet.analyzer import analyze_fleet
@@ -781,6 +782,161 @@ def run_hub_vision_workflow(hub_id: str = "HUB-JKT", observed_packages: int | No
         "intervention": occupancy["intervention"],
         "updates": ["ETA", "SLA risk", "routing", "dashboard", "capacity planning analytics"],
     }
+
+
+CV_EVENT_TYPES = {
+    "PACKAGE_DAMAGE_DETECTED": {"module": "PACKAGE_QUALITY", "signal_type": "PACKAGE_DAMAGE_RISK_DETECTED"},
+    "PACKAGE_LOADING_MISMATCH": {"module": "DISPATCH_VALIDATION", "signal_type": "WRONG_PACKAGE_LOADING_DETECTED"},
+    "PACKAGE_LOADING_VALIDATED": {"module": "DISPATCH_VALIDATION", "signal_type": "WRONG_PACKAGE_LOADING_DETECTED"},
+    "LOAD_COMPLIANCE_UPDATED": {"module": "LOADING_COMPLIANCE", "signal_type": "LOADING_COMPLIANCE_UPDATED"},
+    "HUB_VISUAL_CONGESTION_CHANGED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+}
+
+
+def _cv_event_id(event: dict) -> str:
+    if event.get("event_id"):
+        return str(event["event_id"])
+    seed = repo.jdump({k: event.get(k) for k in ["event_type", "shipment_id", "hub_id", "vehicle_id", "observed_at", "payload"]})
+    return "CVE-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16].upper()
+
+
+def _severity_to_backend(value: str | None) -> str:
+    text = str(value or "Info").upper()
+    if text in {"CRITICAL", "HIGH"}:
+        return "Critical"
+    if text in {"WARNING", "MEDIUM"}:
+        return "Warning"
+    return "Info"
+
+
+def _cv_payload(event: dict) -> dict:
+    payload = dict(event.get("payload") or {})
+    payload.update({
+        "cv_event_id": event["event_id"],
+        "cv_module": event["module"],
+        "camera_id": event.get("camera_id"),
+        "source": event.get("source", "LOCAL_CV_WORKER"),
+        "processing_time_ms": event.get("processing_time_ms"),
+        "model_name": event.get("model_name"),
+        "model_version": event.get("model_version"),
+    })
+    return payload
+
+
+def ingest_cv_event(event: dict) -> dict:
+    initialize_database()
+    event = dict(event or {})
+    event["event_id"] = _cv_event_id(event)
+    event["event_type"] = str(event.get("event_type") or "").upper()
+    if event["event_type"] not in CV_EVENT_TYPES:
+        raise ValueError(f"Unsupported CV event_type {event.get('event_type')}")
+    event["module"] = str(event.get("module") or CV_EVENT_TYPES[event["event_type"]]["module"]).upper()
+    event["source"] = str(event.get("source") or "LOCAL_CV_WORKER")
+    event["observed_at"] = str(event.get("observed_at") or now_iso())
+    event["confidence"] = float(event.get("confidence") if event.get("confidence") is not None else 0.5)
+    event["confidence"] = max(0.0, min(1.0, event["confidence"]))
+    event["severity"] = _severity_to_backend(event.get("severity"))
+    duplicate = repo.row("SELECT * FROM cv_observations WHERE event_id=?", (event["event_id"],))
+    if duplicate:
+        repo.execute("UPDATE cv_observations SET duplicate_count=duplicate_count+1 WHERE event_id=?", (event["event_id"],))
+        return {"accepted": True, "duplicate": True, "event_id": event["event_id"], "observation": cv_event(event["event_id"])}
+
+    payload = _cv_payload(event)
+    operational = _process_cv_operational_effect(event, payload)
+    signal_id = operational.get("signal", {}).get("signal_id") if isinstance(operational, dict) else None
+    repo.execute(
+        "INSERT INTO cv_observations(event_id,event_type,module,source,camera_id,observed_at,demo_time,shipment_id,package_id,hub_id,vehicle_id,confidence,severity,model_name,model_version,processing_time_ms,payload_json,operational_signal_id,processing_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            event["event_id"], event["event_type"], event["module"], event["source"], event.get("camera_id"),
+            event["observed_at"], event.get("demo_time"), event.get("shipment_id"), event.get("package_id"),
+            event.get("hub_id"), event.get("vehicle_id"), event["confidence"], event["severity"],
+            event.get("model_name"), event.get("model_version"), event.get("processing_time_ms"),
+            repo.jdump(payload), signal_id, "PROCESSED",
+        ),
+    )
+    return {"accepted": True, "duplicate": False, "event_id": event["event_id"], "operational_effect": operational, "observation": cv_event(event["event_id"])}
+
+
+def _process_cv_operational_effect(event: dict, payload: dict) -> dict:
+    event_type = event["event_type"]
+    if event_type == "PACKAGE_DAMAGE_DETECTED":
+        return process_package_damage_signal(event.get("shipment_id") or "SHP-1028")
+    if event_type in {"PACKAGE_LOADING_MISMATCH", "PACKAGE_LOADING_VALIDATED"}:
+        observed = event.get("vehicle_id") or payload.get("observed_vehicle_id") or payload.get("current_vehicle_id")
+        return process_wrong_loading_signal(event.get("shipment_id") or "SHP-1028", observed)
+    if event_type == "LOAD_COMPLIANCE_UPDATED":
+        return run_loading_compliance_workflow(
+            event.get("vehicle_id") or payload.get("vehicle_id") or "TRK-001",
+            int(payload.get("loaded_packages") or payload.get("current_count") or 6),
+            int(payload.get("visual_capacity") or payload.get("capacity") or 5),
+        )
+    if event_type == "HUB_VISUAL_CONGESTION_CHANGED":
+        return run_hub_vision_workflow(event.get("hub_id") or "HUB-JKT", int(payload.get("observed_packages") or payload.get("queue_length") or 42))
+    raise ValueError(f"No processor for {event_type}")
+
+
+def _cv_row(row: dict) -> dict:
+    item = dict(row)
+    item["payload"] = repo.jload(item.pop("payload_json"), {})
+    return item
+
+
+def cv_events(limit: int = 80) -> list[dict]:
+    initialize_database()
+    return [_cv_row(row) for row in repo.rows("SELECT * FROM cv_observations ORDER BY created_at DESC LIMIT ?", (limit,))]
+
+
+def cv_event(event_id: str) -> dict:
+    initialize_database()
+    row = repo.row("SELECT * FROM cv_observations WHERE event_id=?", (event_id,))
+    if not row:
+        raise ValueError(f"Unknown CV event {event_id}")
+    return _cv_row(row)
+
+
+def cv_state() -> dict:
+    events = cv_events(30)
+    return {
+        "worker_mode": "LOCAL_CV_DEMO",
+        "backend_ingestion": "ONLINE",
+        "latest_event": events[0] if events else None,
+        "event_count": len(repo.rows("SELECT event_id FROM cv_observations")),
+        "recent_events": events[:10],
+        "signal_counts": count_by_signal_type(list_operational_signals(limit=200)),
+        "asset_audit": visual_asset_audit(),
+        "worker_hint": "Start the local worker with: python -m cv_worker.main",
+    }
+
+
+def replay_cv_scenario(scenario: str = "ALL") -> dict:
+    scenario = scenario.upper()
+    base = [
+        {"event_type": "PACKAGE_DAMAGE_DETECTED", "module": "PACKAGE_QUALITY", "shipment_id": "SHP-1028", "package_id": "PKG-1028", "hub_id": "HUB-JKT", "confidence": 0.91, "severity": "HIGH", "model_name": "balon-damage-demo", "model_version": "replay-v1", "processing_time_ms": 42, "payload": {"damage_type": "crushed", "inspection_required": True}},
+        {"event_type": "PACKAGE_LOADING_MISMATCH", "module": "DISPATCH_VALIDATION", "shipment_id": "SHP-1028", "package_id": "PKG-1028", "vehicle_id": "VAN-044", "hub_id": "HUB-JKT", "confidence": 0.94, "severity": "CRITICAL", "model_name": "balon-qr-demo", "model_version": "replay-v1", "processing_time_ms": 29, "payload": {"observed_vehicle_id": "VAN-044", "qr_payload": "SHP-1028"}},
+        {"event_type": "LOAD_COMPLIANCE_UPDATED", "module": "LOADING_COMPLIANCE", "vehicle_id": "TRK-001", "hub_id": "HUB-JKT", "confidence": 0.86, "severity": "MEDIUM", "model_name": "balon-loading-demo", "model_version": "replay-v1", "processing_time_ms": 51, "payload": {"loaded_packages": 6, "visual_capacity": 5, "current_count": 6}},
+        {"event_type": "HUB_VISUAL_CONGESTION_CHANGED", "module": "HUB_VISION", "hub_id": "HUB-JKT", "confidence": 0.88, "severity": "HIGH", "model_name": "balon-hub-demo", "model_version": "replay-v1", "processing_time_ms": 63, "payload": {"observed_packages": 42, "queue_length": 42, "avg_dwell_min": 58}},
+    ]
+    mapping = {
+        "PACKAGE_DAMAGE": [base[0]],
+        "WRONG_LOADING": [base[1]],
+        "LOADING_COMPLIANCE": [base[2]],
+        "HUB_CONGESTION": [base[3]],
+        "ALL": base,
+    }
+    selected = mapping.get(scenario)
+    if selected is None:
+        raise ValueError(f"Unknown replay scenario {scenario}")
+    results = []
+    stamp = hashlib.sha1(f"{scenario}-{now_iso()}".encode("utf-8")).hexdigest()[:8].upper()
+    for index, event in enumerate(selected, 1):
+        item = dict(event)
+        item["event_id"] = f"CVE-REPLAY-{scenario}-{stamp}-{index:02d}"
+        item["source"] = "DEMO_REPLAY"
+        item["camera_id"] = "CAM-DEMO-REPLAY"
+        item["observed_at"] = now_iso()
+        item["demo_time"] = item["observed_at"]
+        results.append(ingest_cv_event(item))
+    return {"scenario": scenario, "events_sent": len(results), "results": results, "state": cv_state()}
 
 
 def carbon_estimate(payload: dict) -> dict:

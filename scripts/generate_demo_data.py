@@ -70,7 +70,7 @@ def haversine_km(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> floa
 
 def clear_tables() -> None:
     for table in [
-        "intervention_impacts", "operational_interventions", "hub_overflow_forecasts", "operational_signals",
+        "cv_observations", "cv_runtime_sessions", "intervention_impacts", "operational_interventions", "hub_overflow_forecasts", "operational_signals",
         "route_candidates", "routes", "traffic_snapshots", "weather_snapshots", "gps_events", "hub_events",
         "loading_inspections", "delay_predictions", "sla_predictions", "carbon_estimates", "route_recommendations",
         "alerts", "maintenance_history", "breakdown_history", "maintenance_predictions", "simulation_events",

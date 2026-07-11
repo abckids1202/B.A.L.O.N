@@ -1318,6 +1318,89 @@ function PackageReports({ shared }) {
 
 
 
+
+function useLiveCvState(mode) {
+  const [state, setState] = useState({ loading: true, error: "", data: null, events: [] });
+  useEffect(() => {
+    let active = true;
+    api.cvState()
+      .then((data) => active && setState((current) => ({ ...current, loading: false, data, events: data.recent_events || [] })))
+      .catch((error) => active && setState((current) => ({ ...current, loading: false, error: error.message })));
+    const source = new EventSource(`${api.base}/api/cv/events/stream`);
+    source.addEventListener("cv_event", (event) => {
+      const item = JSON.parse(event.data);
+      if (!active) return;
+      setState((current) => ({ ...current, data: { ...(current.data || {}), latest_event: item }, events: [item, ...(current.events || []).filter((row) => row.event_id !== item.event_id)].slice(0, 12) }));
+    });
+    source.onerror = () => {
+      if (active) setState((current) => ({ ...current, error: current.error || "Live CV stream is reconnecting" }));
+    };
+    return () => {
+      active = false;
+      source.close();
+    };
+  }, [mode]);
+  return state;
+}
+
+function LiveCVWorkspace({ mode, scenario, title }) {
+  const live = useLiveCvState(mode);
+  const [busy, setBusy] = useState(false);
+  const [worker, setWorker] = useState({ loading: true, ok: false, data: null });
+  useEffect(() => {
+    let active = true;
+    fetch("http://127.0.0.1:8765/health")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("worker offline")))
+      .then((data) => active && setWorker({ loading: false, ok: true, data }))
+      .catch(() => active && setWorker({ loading: false, ok: false, data: null }));
+    return () => { active = false; };
+  }, [mode]);
+  async function replay() {
+    setBusy(true);
+    try {
+      const data = await api.cvReplay(scenario);
+      live.data = data.state;
+    } finally {
+      setBusy(false);
+    }
+  }
+  const latest = live.events?.[0] || live.data?.latest_event;
+  return (
+    <Panel title={title || "Local CV Demo Runtime"} icon={Activity}>
+      <div className="cv-live-grid">
+        <div className="cv-video-panel">
+          {worker.ok ? <img src="http://127.0.0.1:8765/stream" alt="Local CV worker stream" /> : <div><b>LOCAL CV WORKER OFFLINE</b><span>Start it with python -m cv_worker.main, or use replay mode.</span></div>}
+        </div>
+        <div className="cv-status-panel">
+          <div className="detail-table-mini">
+            <span><b>Worker</b>{worker.ok ? "ONLINE" : "OFFLINE"}</span>
+            <span><b>Backend ingest</b>{live.data?.backend_ingestion || "ONLINE"}</span>
+            <span><b>Mode</b>{worker.data?.active_mode || mode}</span>
+            <span><b>Camera</b>{worker.data?.camera_status || "not connected"}</span>
+            <span><b>Package model</b>{worker.data?.package_model_status || "weights missing"}</span>
+            <span><b>Damage model</b>{worker.data?.damage_model_status || "weights missing"}</span>
+            <span><b>FPS</b>{worker.data?.camera_fps ? `${worker.data.camera_fps.toFixed(1)} camera / ${worker.data.inference_fps.toFixed(1)} inference` : "N/A"}</span>
+            <span><b>Last event</b>{latest ? `${latest.event_type} (${latest.severity})` : "none yet"}</span>
+          </div>
+          <div className="control-row">
+            <Button onClick={replay} busy={busy}>Run Replay</Button>
+            <a className="button secondary" href="http://127.0.0.1:8765/docs" target="_blank" rel="noreferrer">Worker API</a>
+          </div>
+        </div>
+      </div>
+      <div className="cv-event-strip">
+        {(live.events || []).slice(0, 6).map((event) => (
+          <article key={event.event_id}>
+            <b>{event.event_type.replaceAll("_", " ")}</b>
+            <span>{event.shipment_id || event.vehicle_id || event.hub_id || "network"} - {formatTimeWib(event.observed_at)} - {formatPercent(event.confidence)}</span>
+          </article>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+
 function VisionStageFlow({ active = 1 }) {
   const stages = ["Damage Detection", "QR + Wrong Loading", "Loading Compliance", "Hub Congestion", "AI Updates"];
   return (
@@ -1360,6 +1443,7 @@ function PackageQuality() {
     <>
       <Header title="Package Quality" description="Model A watches package arrival, detects possible damage, and writes a normalized signal before SLA, routing, and package twin decisions update." action={<Button onClick={run} busy={busy}>Run Quality Gate</Button>} />
       <Status {...summary}>
+        <LiveCVWorkspace mode="PACKAGE_QUALITY" scenario="PACKAGE_DAMAGE" title="Package Quality Live Camera" />
         <VisionStageFlow active={1} />
         <div className="metrics-grid">
           <Card label="Damage classes" value={classes.length || 0} detail={classes.join(", ") || "dataset not found"} />
@@ -1400,6 +1484,7 @@ function DispatchValidation() {
   return (
     <>
       <Header title="Dispatch Validation" description="Wrong loading is not another detector. Package/label YOLO finds the label region, QR decoding reads the shipment ID, then the backend compares the planned vehicle." action={<Button onClick={scan} busy={busy}>Scan Demo QR</Button>} />
+      <LiveCVWorkspace mode="DISPATCH_VALIDATION" scenario="WRONG_LOADING" title="Dispatch Validation Live Camera" />
       <VisionStageFlow active={2} />
       <Panel title="QR Scan Workbench" icon={PackageSearch}>
         <div className="control-grid">
@@ -1450,6 +1535,7 @@ function LoadingCompliance() {
   return (
     <>
       <Header title="Loading Compliance" description="Model A continues after QR validation: package tracks crossing the vehicle ROI estimate load utilization and block departure when the dock state is unsafe." action={<Button onClick={run} busy={busy}>Run Compliance Check</Button>} />
+      <LiveCVWorkspace mode="LOADING_COMPLIANCE" scenario="LOADING_COMPLIANCE" title="Loading Compliance Live Camera" />
       <VisionStageFlow active={3} />
       <Panel title="Dock ROI Controls" icon={Truck}>
         <div className="control-grid">
@@ -1490,6 +1576,7 @@ function HubVision() {
   return (
     <>
       <Header title="Hub Vision" description="Model B uses the package detector plus ByteTrack memory. Fixed hub zones convert anonymous package detections into queue length, dwell time, congestion state, and overflow forecasts." action={<Button onClick={run} busy={busy}>Run Hub Vision</Button>} />
+      <LiveCVWorkspace mode="HUB_VISION" scenario="HUB_CONGESTION" title="Hub Vision Live Camera" />
       <VisionStageFlow active={5} />
       <Panel title="Hub Scenario" icon={Network}>
         <div className="control-grid">
