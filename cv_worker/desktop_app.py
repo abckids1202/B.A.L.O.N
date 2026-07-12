@@ -33,15 +33,25 @@ def _panel(cv2, img, x1, y1, x2, y2, title):
 def _backend_decision(status: dict) -> tuple[str, str, str]:
     last = status.get("last_event") or {}
     if last.get("module") and last.get("module") != status.get("active_mode"):
-        return "No material event for this mode yet", "Move/scan in this mode, then emit or wait for an auto event", "N/A"
+        return "No material event yet", "Complete the current module action to update backend", "N/A"
     if status.get("last_emit_error"):
         return "Not ready", status.get("last_emit_error"), "N/A"
     result = status.get("last_backend_result") or {}
     effect = result.get("operational_effect") or {}
     signal = effect.get("signal") or {}
     intervention = effect.get("intervention") or {}
-    decision = intervention.get("intervention_type") or signal.get("signal_type") or result.get("delivery_status") or "Waiting"
-    action = intervention.get("recommended_action") or result.get("delivery_status") or "Press E to emit material event"
+    if intervention.get("recommended_action"):
+        decision = intervention.get("intervention_type", "AI RECOMMENDATION")
+        action = intervention["recommended_action"]
+    elif signal.get("signal_type"):
+        decision = signal["signal_type"]
+        action = "Operational state updated"
+    elif result.get("delivery_status") == "DELIVERED":
+        decision = "Decision applied"
+        action = "Web dashboard updated"
+    else:
+        decision = "Waiting"
+        action = "Run the module workflow"
     confidence = signal.get("confidence")
     return str(decision).replace("_", " "), str(action)[:52], f"{confidence:.0%}" if isinstance(confidence, (int, float)) else "N/A"
 
@@ -50,43 +60,60 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
     analysis = status.get("latest_analysis") or {}
     detections = analysis.get("detections") or []
     qr = analysis.get("qr") or {}
-    markers = analysis.get("markers") or []
     observations = analysis.get("tracking_observations") or []
     loading = analysis.get("loading") or {}
     hub = analysis.get("hub") or {}
     damage = analysis.get("damage") or {}
+    last = status.get("last_event") or {}
+    payload = last.get("payload") or {}
     if mode == "PACKAGE_QUALITY":
         top = detections[0] if detections else {}
+        label = damage.get("label")
+        confidence = float(damage.get("confidence") or 0)
+        condition = label or ("READY TO ANALYZE" if top else "WAITING")
+        quality = 97 if label == "NORMAL" else 61 if label == "DAMAGED" else 0
+        severity = "Low" if label == "NORMAL" else "Medium" if label == "DAMAGED" else "Pending"
+        recommendation = "Ready for dispatch" if label == "NORMAL" else "Manual inspection" if label == "DAMAGED" else "Press A to analyze"
         return [
-            f"Package provider: {status.get('package_provider')}",
-            f"Package: {top.get('raw_class', 'not detected')}",
-            f"Confidence: {top.get('confidence', 0):.0%}" if top else "Confidence: N/A",
-            f"Damage: {damage.get('label', status.get('damage_model_status'))}",
+            f"Package: {'Detected' if top else 'Waiting'}",
+            f"Condition: {condition}",
+            f"Confidence: {confidence:.0%}" if label else (f"Box confidence: {top.get('confidence', 0):.0%}" if top else "Confidence: N/A"),
+            f"Severity: {severity}",
+            f"Quality Score: {quality}/100" if quality else "Quality Score: pending",
+            f"Recommendation: {recommendation}",
         ]
     if mode == "DISPATCH_VALIDATION":
-        payload = qr.get("payload") or {}
+        qr_payload = qr.get("payload") or {}
         return [
-            f"QR: {'DETECTED' if qr else 'waiting'}",
-            f"Shipment: {payload.get('shipment_id', '-')}",
-            f"Shipment: {payload.get('shipment_id', '-')}",
-            f"Vehicle: expected {((status.get('last_event') or {}).get('payload') or {}).get('expected_vehicle_id', 'VAN-021')} / active {status.get('active_loading_context', {}).get('current_vehicle_id')}",
-            f"Route: active {status.get('active_loading_context', {}).get('current_route_id')}",
-            "Use SHP-LOAD-001 for dispatch demo",
+            f"Shipment: {qr_payload.get('shipment_id', 'Scan SHP-LOAD-001')}",
+            f"Package: {qr_payload.get('package_id', '-')}",
+            f"Expected Vehicle: {payload.get('expected_vehicle_id', 'VAN-021')}",
+            f"Current Vehicle: {status.get('active_loading_context', {}).get('current_vehicle_id')}",
+            f"Status: {payload.get('validation_result', 'WAITING')}",
+            f"Dispatch: {payload.get('dispatch_state', 'PENDING')}",
         ]
     if mode == "LOADING_COMPLIANCE":
+        loaded_ids = loading.get("loaded_track_ids", [])
+        status_text = "OVER CAPACITY" if loading.get("status") == "BLOCKED" else "READY"
         return [
-            f"Configured: {status.get('configured_loading_tracking')} / Active: {status.get('tracker_status')}",
-            f"Visible: {loading.get('visible_packages', len(observations))} / Stable: {loading.get('stable_tracks', 0)}",
-            f"Loaded: {loading.get('loaded_packages', 0)}/{loading.get('visual_capacity', 5)}",
-            f"Dispatch: {loading.get('status', 'READY')}",
-            f"Crossings: {loading.get('entry_crossings', 0)} in / {loading.get('exit_crossings', 0)} out",
+            f"Tracking: {status.get('configured_loading_tracking')} / {status.get('tracker_status')}",
+            f"Detected Packages: {loading.get('loaded_packages', 0)}",
+            f"Maximum: {loading.get('visual_capacity', 5)}",
+            f"Status: {status_text}",
+            f"Recommendation: {'Remove one package' if status_text == 'OVER CAPACITY' else 'Dispatch can proceed'}",
+            f"Detected IDs: {', '.join(loaded_ids[:3]) if loaded_ids else 'show markers'}",
         ]
+    track = (hub.get("track_states") or [{}])[-1]
+    current = track.get("current_zone") or "NONE"
+    previous = track.get("previous_zone") or "-"
+    dwell = track.get("current_zone_dwell_min", hub.get("average_dwell_min", 0))
     return [
-        f"Configured: {status.get('configured_hub_tracking')} / Active: {status.get('tracker_status')}",
-        f"Queue: {hub.get('queue_length', 0)} / Main: {hub.get('main_pressure_zone', '-')}",
-        f"Dwell: {hub.get('average_dwell_min', 0)} sim min",
-        f"Congestion: {hub.get('congestion_level', 'LOW')}",
-        f"Transitions: {len(hub.get('transitions', []))}",
+        f"Tracking: {status.get('configured_hub_tracking')} / {status.get('tracker_status')}",
+        f"Current Zone: {current}",
+        f"Previous Zone: {previous}",
+        f"Time in Zone: {dwell} sim min",
+        f"Transitions: {track.get('transition_count', 0)}",
+        f"Congestion: {hub.get('congestion_level', 'LOW')} / Occupancy {sum((hub.get('zone_counts') or {}).values())}",
     ]
 
 
@@ -125,7 +152,8 @@ def _draw_operational_guides(cv2, frame, status):
             _text(cv2, frame, "EXIT", p1[0] + 4, p1[1] + 24, .55, (239, 68, 68), 2)
     if mode == "HUB_VISION":
         for zone in (analysis.get("hub") or {}).get("zones") or []:
-            _draw_poly(cv2, frame, zone.get("polygon") or [], (245, 158, 11), zone.get("zone_id"))
+            colors = {"INCOMING": (34, 197, 94), "PROCESSING": (245, 158, 11), "OUTGOING": (59, 130, 246)}
+            _draw_poly(cv2, frame, zone.get("polygon") or [], colors.get(zone.get("zone_id"), (245, 158, 11)), zone.get("zone_id"))
     return frame
 
 def _draw_analysis(cv2, frame, status):
@@ -187,12 +215,14 @@ def _annotate(cv2, frame):
     decision, action, conf = _backend_decision(status)
     _text(cv2, canvas, decision[:34], 900, 362, .58, (15, 23, 42), 2)
     _text(cv2, canvas, action, 900, 398, .5, (71, 85, 105), 1)
-    _text(cv2, canvas, f"Signal confidence: {conf}", 900, 434, .52, (71, 85, 105), 1)
-    _text(cv2, canvas, f"Delivery: {status['delivery_status']}", 900, 470, .52, (22, 163, 74) if status["delivery_status"] == "DELIVERED" else (202, 138, 4), 2)
+    _text(cv2, canvas, f"Backend confidence: {conf}", 900, 434, .52, (71, 85, 105), 1)
+    delivery_label = "Dashboard updated" if status["delivery_status"] == "DELIVERED" else status["delivery_status"]
+    _text(cv2, canvas, delivery_label, 900, 470, .52, (22, 163, 74) if status["delivery_status"] == "DELIVERED" else (202, 138, 4), 2)
 
-    _panel(cv2, canvas, 880, 518, 1238, 594, "IMPACT")
+    _panel(cv2, canvas, 880, 518, 1238, 594, "AI RECOMMENDATION")
     last = status.get("last_event") or {}
-    _text(cv2, canvas, str(last.get("event_type", "No material event yet")).replace("_", " ")[:38], 900, 566, .54)
+    rec = (last.get("payload") or {}).get("dispatch_state") or str(last.get("event_type", "No material event yet")).replace("_", " ")
+    _text(cv2, canvas, rec[:38], 900, 566, .54)
 
     cv2.rectangle(canvas, (16, 616), (1264, 704), (15, 23, 42), -1)
     delivered_dot = (34, 197, 94) if status["delivery_status"] == "DELIVERED" else (245, 158, 11) if status["delivery_status"] == "QUEUED" else (148, 163, 184)

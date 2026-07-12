@@ -12,12 +12,9 @@ DEFAULT_LOADING_CONFIG = {
 
 DEFAULT_HUB_ZONES = {
     "zones": [
-        {"zone_id": "INBOUND", "polygon": [[0.02, 0.05], [0.35, 0.05], [0.35, 0.38], [0.02, 0.38]], "capacity": 4},
-        {"zone_id": "QUEUE", "polygon": [[0.35, 0.05], [0.98, 0.05], [0.98, 0.38], [0.35, 0.38]], "capacity": 8},
-        {"zone_id": "SORTING", "polygon": [[0.02, 0.38], [0.55, 0.38], [0.55, 0.68], [0.02, 0.68]], "capacity": 8},
-        {"zone_id": "STAGING", "polygon": [[0.55, 0.38], [0.98, 0.38], [0.98, 0.68], [0.55, 0.68]], "capacity": 6},
-        {"zone_id": "LOADING", "polygon": [[0.02, 0.68], [0.75, 0.68], [0.75, 0.96], [0.02, 0.96]], "capacity": 6},
-        {"zone_id": "OUTBOUND", "polygon": [[0.75, 0.68], [0.98, 0.68], [0.98, 0.96], [0.75, 0.96]], "capacity": 4},
+        {"zone_id": "INCOMING", "polygon": [[0.02, 0.08], [0.98, 0.08], [0.98, 0.36], [0.02, 0.36]], "capacity": 6},
+        {"zone_id": "PROCESSING", "polygon": [[0.02, 0.36], [0.98, 0.36], [0.98, 0.68], [0.02, 0.68]], "capacity": 8},
+        {"zone_id": "OUTGOING", "polygon": [[0.02, 0.68], [0.98, 0.68], [0.98, 0.96], [0.02, 0.96]], "capacity": 6},
     ]
 }
 
@@ -214,10 +211,10 @@ class HubState:
                 "current_zone_dwell_min": round(dwell, 1),
                 "transition_count": track.get("transition_count", 0),
             })
-        queue = by_zone.get("QUEUE", 0)
+        queue = by_zone.get("PROCESSING", 0)
         avg_dwell = sum(dwell_values) / len(dwell_values) if dwell_values else 0
         occupancy = min(1.0, len(active_ids) / 12)
-        flow_imbalance = max(0, queue - by_zone.get("OUTBOUND", 0))
+        flow_imbalance = max(0, queue - by_zone.get("OUTGOING", 0))
         score = min(100, round(occupancy * 25 + min(queue / 8, 1) * 20 + min(avg_dwell / 10, 1) * 25 + flow_imbalance * 3))
         level = "CRITICAL" if score >= 75 else "HIGH" if score >= 55 else "MODERATE" if score >= 30 else "LOW"
         main_zone = max(by_zone.items(), key=lambda item: item[1])[0] if by_zone else None

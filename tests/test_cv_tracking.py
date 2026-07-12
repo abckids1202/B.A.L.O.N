@@ -47,16 +47,16 @@ def test_hub_zone_recomputes_and_resets_dwell_on_transition():
     state = HubState(time_multiplier=60)
     width, height = 1000, 600
 
-    queue = state.update(observation(500, 100), width, height, "ARUCO_IDENTITY")
-    assert queue["track_states"][0]["current_zone"] == "QUEUE"
+    incoming = state.update(observation(500, 100), width, height, "ARUCO_IDENTITY")
+    assert incoming["track_states"][0]["current_zone"] == "INCOMING"
 
     sorting = state.update(observation(300, 320), width, height, "ARUCO_IDENTITY")
-    assert sorting["track_states"][0]["previous_zone"] == "QUEUE"
-    assert sorting["track_states"][0]["current_zone"] == "SORTING"
+    assert sorting["track_states"][0]["previous_zone"] == "INCOMING"
+    assert sorting["track_states"][0]["current_zone"] == "PROCESSING"
     assert sorting["track_states"][0]["transition_count"] == 1
     assert sorting["track_states"][0]["current_zone_dwell_min"] == 0.0
 
     loading = state.update(observation(500, 500), width, height, "ARUCO_IDENTITY")
-    assert loading["track_states"][0]["previous_zone"] == "SORTING"
-    assert loading["track_states"][0]["current_zone"] == "LOADING"
+    assert loading["track_states"][0]["previous_zone"] == "PROCESSING"
+    assert loading["track_states"][0]["current_zone"] == "OUTGOING"
     assert loading["track_states"][0]["transition_count"] == 2

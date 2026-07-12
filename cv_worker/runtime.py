@@ -16,6 +16,12 @@ from cv_worker.tracking.centroid_tracker import CentroidTracker
 from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubState, LoadingState
 
 
+def observed_short(value: str | None) -> str:
+    if not value:
+        return "--:--:--"
+    return str(value).split("T")[-1].split("+")[0].split(".")[0]
+
+
 HERO_ASSIGNMENTS = {
     "SHP-DMG-001": {"package_id": "PKG-DMG-001", "planned_vehicle_id": "VAN-021", "planned_route_id": "RTE-JKT-BKS-01", "module": "PACKAGE_QUALITY"},
     "SHP-LOAD-001": {"package_id": "PKG-LOAD-001", "planned_vehicle_id": "VAN-021", "planned_route_id": "RTE-JKT-BKS-01", "module": "DISPATCH_VALIDATION"},
@@ -55,6 +61,9 @@ class CVRuntime:
         self.backend_enabled = config.backend_event_enabled
         self.last_backend_result: dict | None = None
         self.last_event: dict | None = None
+        self.mode_events: dict[str, dict | None] = {}
+        self.mode_backend_results: dict[str, dict | None] = {}
+        self.event_timeline: list[dict] = []
         self.event_client = EventClient(config.backend_url)
         self.qr_reader = QRReader()
         self.marker_reader = MarkerReader()
@@ -118,6 +127,9 @@ class CVRuntime:
             self._last_qr_emit.clear()
         self.last_event = None
         self.last_backend_result = None
+        self.mode_events.pop(self.mode, None)
+        self.mode_backend_results.pop(self.mode, None)
+        self.event_timeline = [item for item in self.event_timeline if item.get("module") != self.mode]
         self.last_emit_error = None
         self.latest_analysis.update({"tracking_observations": [], "tracking_provider": "NONE", "loading": {}, "hub": {}})
 
@@ -234,11 +246,16 @@ class CVRuntime:
             return self.last_backend_result
         self.last_emit_error = None
         self.last_event = event
+        self.mode_events[event.get("module", self.mode)] = event
+        self.event_timeline.append({"time": observed_short(event.get("observed_at")), "module": event.get("module"), "event": event.get("event_type"), "status": event.get("payload", {}).get("dispatch_state") or event.get("payload", {}).get("status") or event.get("severity")})
+        self.event_timeline = self.event_timeline[-8:]
         if not self.backend_enabled:
             self.last_backend_result = {"accepted": False, "delivery_status": "DISABLED", "backend_disabled": True}
+            self.mode_backend_results[event.get("module", self.mode)] = self.last_backend_result
             return self.last_backend_result
         result = self.event_client.send(event)
         self.last_backend_result = result
+        self.mode_backend_results[event.get("module", self.mode)] = result
         self.events_emitted += 1
         return result
 
@@ -319,8 +336,9 @@ class CVRuntime:
             "inference_fps": self.inference_fps,
             "latency_ms": self.inference_latency_ms,
             "last_event_at": self.event_client.last_success_at,
-            "last_event": self.last_event,
-            "last_backend_result": last_delivery,
+            "last_event": self.mode_events.get(self.mode) or self.last_event,
+            "last_backend_result": self.mode_backend_results.get(self.mode) or last_delivery,
+            "event_timeline": self.event_timeline,
             "delivery_history": list(self.event_client.history),
             "events_emitted": self.events_emitted,
             "source_type": self.camera.source_type,
