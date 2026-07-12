@@ -1323,11 +1323,12 @@ function useLiveCvState(mode) {
   const [state, setState] = useState({ loading: true, error: "", data: null, events: [] });
   useEffect(() => {
     let active = true;
+    const moduleEvents = (items = []) => items.filter((item) => !mode || item?.module === mode);
     api.cvState()
-      .then((data) => active && setState((current) => ({ ...current, loading: false, data, events: data.recent_events || [] })))
+      .then((data) => active && setState((current) => ({ ...current, loading: false, data, events: moduleEvents(data.recent_events || []) })))
       .catch((error) => active && setState((current) => ({ ...current, loading: false, error: error.message })));
     const pushEvent = (item) => {
-      if (!active || !item?.event_id) return;
+      if (!active || !item?.event_id || item.module !== mode) return;
       setState((current) => ({ ...current, data: { ...(current.data || {}), latest_event: item }, events: [item, ...(current.events || []).filter((row) => row.event_id !== item.event_id)].slice(0, 12) }));
     };
     const source = new EventSource(`${api.base}/api/cv/events/stream`);
@@ -1336,7 +1337,7 @@ function useLiveCvState(mode) {
       if (active) setState((current) => ({ ...current, error: current.error || "Live CV stream is reconnecting" }));
     };
     const poller = setInterval(() => {
-      api.cvEvents(1).then((items) => pushEvent(items?.[0])).catch(() => {});
+      api.cvEvents(12).then((items) => moduleEvents(items || []).forEach(pushEvent)).catch(() => {});
     }, 2500);
     return () => {
       active = false;
@@ -1370,7 +1371,7 @@ function LiveCVWorkspace({ mode, scenario, title }) {
       setBusy(false);
     }
   }
-  const latest = live.events?.[0] || live.data?.latest_event;
+  const latest = live.events?.[0] || (live.data?.latest_event?.module === mode ? live.data.latest_event : null);
   const payload = latest?.payload || {};
   const decision = latest?.operational_signal_id ? "Backend processed material event" : "Waiting for material CV event";
   return (
@@ -1393,7 +1394,7 @@ function LiveCVWorkspace({ mode, scenario, title }) {
           <b>DETECTION</b>
           <span>{latest ? latest.event_type.replaceAll("_", " ") : "No event yet"}</span>
           <small>{latest ? `${latest.shipment_id || latest.vehicle_id || latest.hub_id || "network"} / ${formatPercent(latest.confidence)}` : "Press E in the local CV window"}</small>
-          <small>{payload.damage_type || payload.qr_payload || payload.current_count || payload.queue_length || "Awaiting real signal"}</small>
+          <small>{payload.damage_type || payload.validation_result || payload.capacity_status || payload.current_stage || payload.queue_length || "Awaiting real signal"}</small>
         </article>
         <article className="cv-health-card">
           <b>DECISION - IMPACT</b>

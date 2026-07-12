@@ -43,7 +43,7 @@ def test_six_unique_markers_block_and_reset_clears_state():
 
     assert result["loaded_packages"] == 6
     assert result["status"] == "BLOCKED"
-    assert result["loaded_track_ids"] == [f"MARKER-{i}" for i in range(1, 7)]
+    assert result["loaded_track_ids"] == [f"MARKER-{i:02d}" for i in range(1, 7)]
 
     state.reset()
     reset = state.summary("ARUCO_IDENTITY", [])

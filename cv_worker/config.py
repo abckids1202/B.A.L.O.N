@@ -43,7 +43,7 @@ class WorkerConfig:
     hub_tracking_provider: str = os.getenv("CV_HUB_TRACKING_PROVIDER", "aruco").lower()
     event_snapshot_enabled: bool = _bool("CV_EVENT_SNAPSHOT_ENABLED", True)
     backend_event_enabled: bool = _bool("CV_BACKEND_EVENT_ENABLED", True)
-    demo_time_multiplier: float = float(os.getenv("CV_DEMO_TIME_MULTIPLIER", "60"))
+    demo_time_multiplier: float = float(os.getenv("CV_DEMO_TIME_MULTIPLIER", "1"))
 
 
 config = WorkerConfig()

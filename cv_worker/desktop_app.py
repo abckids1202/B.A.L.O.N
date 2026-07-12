@@ -93,27 +93,27 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
             f"Dispatch: {payload.get('dispatch_state', 'PENDING')}",
         ]
     if mode == "LOADING_COMPLIANCE":
-        loaded_ids = loading.get("loaded_track_ids", [])
-        status_text = "OVER CAPACITY" if loading.get("status") == "BLOCKED" else "READY"
+        loaded_ids = loading.get("loaded_marker_ids") or loading.get("loaded_track_ids") or []
+        visible_ids = loading.get("visible_marker_ids") or []
+        capacity_status = str(loading.get("capacity_status", "WITHIN_LIMIT")).replace("_", " ")
         return [
             f"Tracking: {status.get('configured_loading_tracking')} / {status.get('tracker_status')}",
-            f"Detected Packages: {loading.get('loaded_packages', 0)}",
-            f"Maximum: {loading.get('visual_capacity', 5)}",
-            f"Status: {status_text}",
-            f"Recommendation: {'Remove one package' if status_text == 'OVER CAPACITY' else 'Dispatch can proceed'}",
-            f"Detected IDs: {', '.join(loaded_ids[:3]) if loaded_ids else 'show markers'}",
+            f"Visible Markers: {', '.join(visible_ids[:4]) if visible_ids else 'show ArUco markers'}",
+            f"Loaded: {loading.get('loaded_packages', 0)}/{loading.get('visual_capacity', 5)}",
+            f"Capacity: {capacity_status}",
+            f"Dispatch: {loading.get('dispatch_state', loading.get('status', 'READY'))}",
+            f"Loaded IDs: {', '.join(loaded_ids[:4]) if loaded_ids else '-'}",
+            f"Events: {loading.get('entry_events', 0)} in / {loading.get('exit_events', 0)} out",
         ]
     track = (hub.get("track_states") or [{}])[-1]
-    current = track.get("current_zone") or "NONE"
-    previous = track.get("previous_zone") or "-"
-    dwell = track.get("current_zone_dwell_min", hub.get("average_dwell_min", 0))
     return [
         f"Tracking: {status.get('configured_hub_tracking')} / {status.get('tracker_status')}",
-        f"Current Zone: {current}",
-        f"Previous Zone: {previous}",
-        f"Time in Zone: {dwell} sim min",
+        f"Current Stage: {track.get('current_stage', hub.get('current_stage', 'WAITING'))}",
+        f"Zone 1 Receiving: {track.get('zone_1_seconds', 0)}s",
+        f"Zone 2 Processing: {track.get('zone_2_seconds', 0)}s",
+        f"Zone 3 Dispatch: {track.get('zone_3_seconds', 0)}s",
+        f"Risk / Total: {track.get('cumulative_risk', 'LOW')} / {track.get('total_journey_seconds', 0)}s",
         f"Transitions: {track.get('transition_count', 0)}",
-        f"Congestion: {hub.get('congestion_level', 'LOW')} / Occupancy {sum((hub.get('zone_counts') or {}).values())}",
     ]
 
 
@@ -151,9 +151,17 @@ def _draw_operational_guides(cv2, frame, status):
             cv2.line(frame, p1, p2, (239, 68, 68), 2)
             _text(cv2, frame, "EXIT", p1[0] + 4, p1[1] + 24, .55, (239, 68, 68), 2)
     if mode == "HUB_VISION":
+        h, w = frame.shape[:2]
+        colors = {"ZONE_1": (34, 197, 94), "ZONE_2": (245, 158, 11), "ZONE_3": (59, 130, 246)}
         for zone in (analysis.get("hub") or {}).get("zones") or []:
-            colors = {"INCOMING": (34, 197, 94), "PROCESSING": (245, 158, 11), "OUTGOING": (59, 130, 246)}
-            _draw_poly(cv2, frame, zone.get("polygon") or [], colors.get(zone.get("zone_id"), (245, 158, 11)), zone.get("zone_id"))
+            zone_id = zone.get("zone_id")
+            if "x_min" in zone and "x_max" in zone:
+                x1 = int(float(zone.get("x_min", 0)) * w)
+                x2 = int(float(zone.get("x_max", 1)) * w)
+                cv2.rectangle(frame, (x1, 0), (x2, h - 1), colors.get(zone_id, (245, 158, 11)), 2)
+                _text(cv2, frame, f"{zone_id} {zone.get('name', '')}".strip(), x1 + 8, 26, .52, colors.get(zone_id, (245, 158, 11)), 2)
+            else:
+                _draw_poly(cv2, frame, zone.get("polygon") or [], colors.get(zone_id, (245, 158, 11)), zone_id)
     return frame
 
 def _draw_analysis(cv2, frame, status):
