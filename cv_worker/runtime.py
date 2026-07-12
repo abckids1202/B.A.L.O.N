@@ -13,7 +13,7 @@ from cv_worker.detectors.qr_reader import QRReader
 from cv_worker.model_registry import damage_model, package_model, registry
 from cv_worker.services.event_client import EventClient
 from cv_worker.tracking.centroid_tracker import CentroidTracker
-from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubJourneySession, LoadingInspectionState
+from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubJourneySession, LoadingInspectionState, _bbox_iou, _centroid_distance_ratio, make_marker_candidate, make_yolo_candidate
 
 
 def observed_short(value: str | None) -> str:
@@ -68,7 +68,7 @@ class CVRuntime:
         self.qr_reader = QRReader()
         self.marker_reader = MarkerReader()
         self.loading_state = LoadingInspectionState(limit=5, config=self._load_json_config("config/cv/loading_roi.json", DEFAULT_LOADING_CONFIG))
-        self.hub_state = HubJourneySession(time_multiplier=config.demo_time_multiplier, config=self._load_json_config("config/cv/hub_zones.json", DEFAULT_HUB_ZONES), baseline_seconds=config.hub_baseline_seconds)
+        self.hub_state = HubJourneySession(time_multiplier=config.demo_time_multiplier, config=self._load_json_config("config/cv/hub_zones.json", DEFAULT_HUB_ZONES), demo_baseline_seconds=config.hub_demo_baseline_seconds, real_baseline_hours=config.hub_real_baseline_hours)
         self.yolo_tracker = CentroidTracker()
         self.active_context_name = "WRONG"
         self.active_context = CONTEXTS[self.active_context_name]
@@ -79,6 +79,7 @@ class CVRuntime:
         self._last_hub_level: str | None = None
         self._last_hub_risk_event: str | None = None
         self._last_hub_projection_bucket: int | None = None
+        self._hub_yolo_history: list[list[dict]] = []
         self.last_emit_error: str | None = None
 
 
@@ -164,8 +165,19 @@ class CVRuntime:
         markers = self.marker_reader.scan(frame)
         height, width = frame.shape[:2]
         tracking_provider, observations = self._tracking_observations(markers, detections)
+        if self.mode == "HUB_VISION":
+            self._record_hub_yolo_history(detections)
+            hub_candidate = self._resolve_hub_candidate(markers, detections, width, height, require_zone_1=False)
+            if hub_candidate:
+                tracking_provider = hub_candidate["source"]
+                observations = [hub_candidate]
+        else:
+            hub_candidate = None
         loading = self.loading_state.summary(config.confidence_threshold)
-        hub = self.hub_state.update(observations, width, height, tracking_provider) if self.mode == "HUB_VISION" else self.hub_state.summary(tracking_provider)
+        hub = self.hub_state.update(hub_candidate, width, height, tracking_provider) if self.mode == "HUB_VISION" else self.hub_state.summary(tracking_provider)
+        if self.mode == "HUB_VISION" and hub_candidate and hub.get("status") == "READY":
+            hub["candidate"] = hub_candidate
+            hub["start_candidate"] = hub_candidate
         self.latest_analysis = {"detections": detections, "qr": qr, "markers": markers, "tracking_observations": observations, "tracking_provider": tracking_provider, "loading": loading, "hub": hub, "damage": self.latest_analysis.get("damage")}
         if not run_model:
             self.inference_latency_ms = (time.perf_counter() - started) * 1000
@@ -177,9 +189,13 @@ class CVRuntime:
     def start_active_module(self, frame=None) -> dict:
         if self.mode == "LOADING_COMPLIANCE":
             return self.capture_loading_snapshot(frame)
+        self.last_emit_error = "S captures Loading snapshots only. Use H to start Hub journeys."
+        return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
+
+    def start_hub_module(self, frame=None) -> dict:
         if self.mode == "HUB_VISION":
             return self.start_hub_journey(frame)
-        self.last_emit_error = "Start is only used for Loading and Hub modes."
+        self.last_emit_error = "H starts Hub journeys only."
         return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
 
     def stop_active_module(self) -> dict:
@@ -215,14 +231,88 @@ class CVRuntime:
             self.last_emit_error = "No camera frame available for hub journey start."
             return {"accepted": False, "delivery_status": "FAILED", "error": self.last_emit_error}
         markers = self.marker_reader.scan(frame)
+        model = package_model()
+        result = detect_packages(model, frame, config.confidence_threshold)
+        detections = result.get("detections", [])
+        self._record_hub_yolo_history(detections)
         height, width = frame.shape[:2]
-        hub = self.hub_state.start(markers, width, height, "ARUCO_IDENTITY")
-        self.latest_analysis.update({"markers": markers, "tracking_observations": markers, "tracking_provider": "ARUCO_IDENTITY", "hub": hub})
+        candidate = self._resolve_hub_candidate(markers, detections, width, height, require_zone_1=True)
+        provider = candidate["source"] if candidate else config.hub_tracking_provider.upper()
+        hub = self.hub_state.start(candidate, width, height, provider)
+        self.latest_analysis.update({"detections": detections, "markers": markers, "tracking_observations": [candidate] if candidate else [], "tracking_provider": provider, "hub": hub})
         if hub.get("status") != "RUNNING":
-            self.last_emit_error = hub.get("last_error") or "Place package in Zone 1 and press S."
+            self.last_emit_error = hub.get("last_error") or "Place package in Receiving and press H."
             return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
         self.last_emit_error = None
         return self.emit_material_event("HUB_JOURNEY_STARTED", hub_id="HUB-JKT", payload=hub, severity="INFO", confidence=0.9)
+
+    def _package_detections(self, detections: list[dict]) -> list[dict]:
+        return [
+            item for item in detections
+            if item.get("normalized_class") == "PACKAGE" and float(item.get("confidence", 0)) >= config.confidence_threshold
+        ]
+
+    def _record_hub_yolo_history(self, detections: list[dict]) -> None:
+        self._hub_yolo_history.append(self._package_detections(detections))
+        self._hub_yolo_history = self._hub_yolo_history[-5:]
+
+    def _stable_yolo_frames(self, detection: dict, width: int, height: int) -> int:
+        count = 0
+        centroid = detection.get("centroid")
+        bbox = detection.get("bbox")
+        for frame_detections in self._hub_yolo_history[-5:]:
+            for candidate in frame_detections:
+                if _bbox_iou(candidate.get("bbox", []), bbox) >= 0.25 or _centroid_distance_ratio(candidate.get("centroid", [0, 0]), centroid, width, height) <= 0.15:
+                    count += 1
+                    break
+        return count
+
+    def _marker_start_candidate(self, markers: list[dict], width: int, height: int, require_zone_1: bool) -> dict | None:
+        for marker in markers:
+            zone = self.hub_state.zone_for(marker.get("center", [0, 0]), width, height)
+            if require_zone_1 and zone != "ZONE_1":
+                continue
+            return make_marker_candidate(marker, zone=zone)
+        return None
+
+    def _yolo_start_candidate(self, detections: list[dict], width: int, height: int, require_zone_1: bool) -> dict | None:
+        packages = self._package_detections(detections)
+        if self.hub_state.status == "RUNNING" and self.hub_state.provider == "YOLO_SINGLE_PACKAGE":
+            matches = []
+            for item in packages:
+                if not self.hub_state.locked_bbox or not self.hub_state.locked_centroid:
+                    continue
+                iou = _bbox_iou(item.get("bbox", []), self.hub_state.locked_bbox)
+                distance = _centroid_distance_ratio(item.get("centroid", [0, 0]), self.hub_state.locked_centroid, width, height)
+                if iou >= 0.25 or distance <= 0.15:
+                    matches.append((iou - distance, item))
+            if matches:
+                item = sorted(matches, key=lambda row: row[0], reverse=True)[0][1]
+                zone = self.hub_state.zone_for(item.get("centroid", [0, 0]), width, height)
+                return make_yolo_candidate(item, zone=zone, stable_frames=self._stable_yolo_frames(item, width, height), identity=self.hub_state.identity or "YOLO-PACKAGE-01")
+            return None
+        candidates = []
+        for item in packages:
+            zone = self.hub_state.zone_for(item.get("centroid", [0, 0]), width, height)
+            if require_zone_1 and zone != "ZONE_1":
+                continue
+            stable = self._stable_yolo_frames(item, width, height)
+            if require_zone_1 and stable < 3:
+                continue
+            candidates.append(make_yolo_candidate(item, zone=zone, stable_frames=stable))
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: (item.get("stable_frames", 0), item.get("confidence", 0)), reverse=True)[0]
+
+    def _resolve_hub_candidate(self, markers: list[dict], detections: list[dict], width: int, height: int, require_zone_1: bool = False) -> dict | None:
+        configured = config.hub_tracking_provider.lower()
+        marker = self._marker_start_candidate(markers, width, height, require_zone_1)
+        yolo = self._yolo_start_candidate(detections, width, height, require_zone_1)
+        if configured in {"aruco", "marker", "markers"}:
+            return marker
+        if configured in {"yolo", "yolo_single_package"}:
+            return yolo
+        return marker or yolo
 
     def analyze_damage(self, frame) -> dict:
         detector = damage_model()
@@ -287,13 +377,13 @@ class CVRuntime:
         risk = hub.get("sla_risk_level")
         if risk and risk != self._last_hub_risk_event:
             self._last_hub_risk_event = risk
-            self.emit_material_event("HUB_SLA_RISK_CHANGED", hub_id="HUB-JKT", payload=hub, severity=risk, confidence=0.84)
-        projected = hub.get("projected_total_seconds")
+            self.emit_material_event("HUB_DELAY_RISK_LEVEL_CHANGED", hub_id="HUB-JKT", payload=hub, severity=risk, confidence=0.84)
+        projected = hub.get("projected_real_dwell_hours")
         if projected is not None:
-            bucket = int(float(projected) // 5)
+            bucket = int(float(projected) // 10)
             if bucket != self._last_hub_projection_bucket:
                 self._last_hub_projection_bucket = bucket
-                self.emit_material_event("HUB_PROJECTED_DELAY_CHANGED", hub_id="HUB-JKT", payload=hub, severity=risk or "INFO", confidence=0.82)
+                self.emit_material_event("HUB_PROJECTED_DWELL_UPDATED", hub_id="HUB-JKT", payload=hub, severity=risk or "INFO", confidence=0.82)
 
     def emit_material_event(self, event_type: str | None = None, **overrides) -> dict:
         event = self._event_for_mode(event_type, **overrides)
@@ -352,7 +442,7 @@ class CVRuntime:
         if mode == "LOADING_COMPLIANCE" and (self.latest_analysis.get("loading") or {}).get("status") != "COMPLETED":
             return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: press S to capture a loading snapshot first."}}
         if mode == "HUB_VISION" and (self.latest_analysis.get("hub") or {}).get("status") == "READY":
-            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: press S to start a hub journey first."}}
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: press H to start a hub journey first."}}
         if mode == "PACKAGE_QUALITY":
             shipment_id = qr_payload.get("shipment_id") or "SHP-DMG-001"
             package_id = qr_payload.get("package_id") or "PKG-DMG-001"
@@ -364,7 +454,7 @@ class CVRuntime:
             event_name = "PROTOTYPE_LOAD_LIMIT_EXCEEDED" if loading.get("excess_count", 0) else "LOADING_COMPLIANCE_VALIDATED"
             return {**base, "event_type": event_name, "vehicle_id": self.active_context["current_vehicle_id"], "hub_id": "HUB-JKT", "payload": {**base["payload"], **loading}}
         hub = self.latest_analysis.get("hub") or {}
-        event_name = "HUB_JOURNEY_COMPLETED" if hub.get("status") == "COMPLETED" else "HUB_PROJECTED_DELAY_CHANGED"
+        event_name = "HUB_JOURNEY_COMPLETED" if hub.get("status") == "COMPLETED" else "HUB_PROJECTED_DWELL_UPDATED"
         return {**base, "event_type": event_name, "hub_id": "HUB-JKT", "severity": hub.get("sla_risk_level", "MEDIUM"), "payload": {**base["payload"], **hub}}
 
     def status(self) -> dict:
@@ -411,3 +501,4 @@ class CVRuntime:
 
 
 runtime = CVRuntime()
+

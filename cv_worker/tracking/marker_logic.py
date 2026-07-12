@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 
 
@@ -55,6 +56,9 @@ def _marker_key(obs: dict) -> str:
     marker_id = obs.get("marker_id")
     if marker_id is not None:
         return str(marker_id)
+    identity = obs.get("identity")
+    if identity:
+        return str(identity)
     track_id = str(obs.get("track_id", "UNKNOWN"))
     if "-" in track_id:
         suffix = track_id.rsplit("-", 1)[-1]
@@ -74,6 +78,42 @@ def _bbox_iou(a: list[float], b: list[float]) -> float:
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union else 0.0
+
+
+def _centroid_distance_ratio(a: list[float], b: list[float], width: int, height: int) -> float:
+    diagonal = math.hypot(max(width, 1), max(height, 1))
+    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])) / diagonal
+
+
+def make_marker_candidate(marker: dict, zone: str | None = None) -> dict:
+    identity = _display_marker(_marker_key(marker))
+    return {
+        "identity": identity,
+        "source": "ARUCO_IDENTITY",
+        "bbox": marker.get("bbox"),
+        "centroid": marker.get("center"),
+        "center": marker.get("center"),
+        "zone": zone,
+        "confidence": 1.0,
+        "stable_frames": int(marker.get("stable_frames", 5) or 5),
+        "label": identity,
+        "last_seen_at": time.time(),
+    }
+
+
+def make_yolo_candidate(detection: dict, zone: str | None = None, stable_frames: int = 1, identity: str = "YOLO-PACKAGE-01") -> dict:
+    return {
+        "identity": identity,
+        "source": "YOLO_SINGLE_PACKAGE",
+        "bbox": detection.get("bbox"),
+        "centroid": detection.get("centroid"),
+        "center": detection.get("centroid"),
+        "zone": zone,
+        "confidence": float(detection.get("confidence", 0)),
+        "stable_frames": stable_frames,
+        "label": detection.get("raw_class") or "PACKAGE",
+        "last_seen_at": time.time(),
+    }
 
 
 class LoadingInspectionState:
@@ -184,22 +224,30 @@ class HubJourneySession:
         self,
         time_multiplier: float = 1.0,
         config: dict | None = None,
+        demo_baseline_seconds: dict[str, float] | None = None,
+        real_baseline_hours: dict[str, float] | None = None,
         baseline_seconds: dict[str, float] | None = None,
     ) -> None:
         self.time_multiplier = time_multiplier
         self.config = config or DEFAULT_HUB_ZONES
-        self.baseline_seconds = baseline_seconds or {"ZONE_1": 5.0, "ZONE_2": 8.0, "ZONE_3": 4.0}
+        self.demo_baseline_seconds = demo_baseline_seconds or baseline_seconds or {"ZONE_1": 10.0, "ZONE_2": 10.0, "ZONE_3": 4.0}
+        self.real_baseline_hours = real_baseline_hours or {"ZONE_1": 72.48, "ZONE_2": 72.0, "ZONE_3": 3.5}
         self.session_index = 0
         self.reset()
 
     @property
     def baseline_total_seconds(self) -> float:
-        return sum(float(self.baseline_seconds.get(zone, 0)) for zone in ["ZONE_1", "ZONE_2", "ZONE_3"])
+        return sum(float(self.demo_baseline_seconds.get(zone, 0)) for zone in ["ZONE_1", "ZONE_2", "ZONE_3"])
+
+    @property
+    def real_baseline_total_hours(self) -> float:
+        return sum(float(self.real_baseline_hours.get(zone, 0)) for zone in ["ZONE_1", "ZONE_2", "ZONE_3"])
 
     def reset(self) -> None:
         self.status = "READY"
         self.session_id = None
-        self.marker_id = None
+        self.identity = None
+        self.provider = None
         self.started_at = None
         self.stopped_at = None
         self.current_zone = None
@@ -211,6 +259,13 @@ class HubJourneySession:
         self.last_error = None
         self.last_transition = None
         self.last_risk_level = None
+        self.locked_bbox = None
+        self.locked_centroid = None
+        self.target_missing_since = None
+        self.paused_at = None
+        self.target_status = "NO_TARGET"
+        self.start_candidate = None
+        self.latest_candidate = None
 
     def _zone_name(self, zone_id: str | None) -> str:
         for zone in self.config.get("zones", []):
@@ -230,30 +285,35 @@ class HubJourneySession:
                     return zone["zone_id"]
         return None
 
-    def _find_active_observation(self, observations: list[dict]) -> dict | None:
-        if self.marker_id is None:
-            return None
-        for obs in observations:
-            if _marker_key(obs) == self.marker_id:
-                return obs
+    def _coerce_candidate(self, candidate: dict | list[dict] | None, width: int, height: int, provider: str) -> dict | None:
+        if isinstance(candidate, dict) and candidate.get("centroid"):
+            result = dict(candidate)
+            result["zone"] = result.get("zone") or self.zone_for(result["centroid"], width, height)
+            return result
+        if isinstance(candidate, list):
+            for obs in candidate:
+                center = obs.get("center") or obs.get("centroid")
+                if not center:
+                    continue
+                zone = self.zone_for(center, width, height)
+                if zone:
+                    if provider == "YOLO_SINGLE_PACKAGE" or str(obs.get("source", "")).startswith("YOLO"):
+                        return make_yolo_candidate({"bbox": obs.get("bbox"), "centroid": center, "confidence": obs.get("confidence", 1), "raw_class": obs.get("raw_class", "PACKAGE")}, zone=zone)
+                    return make_marker_candidate({**obs, "center": center}, zone=zone)
         return None
 
-    def _find_zone_1_observation(self, observations: list[dict], width: int, height: int) -> dict | None:
-        for obs in observations:
-            if self.zone_for(obs["center"], width, height) == "ZONE_1":
-                return obs
-        return None
-
-    def start(self, observations: list[dict], width: int, height: int, provider: str, now: float | None = None) -> dict:
+    def start(self, candidate: dict | list[dict] | None, width: int, height: int, provider: str, now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        obs = self._find_zone_1_observation(observations, width, height)
-        if not obs:
+        resolved = self._coerce_candidate(candidate, width, height, provider)
+        if not resolved or resolved.get("zone") != "ZONE_1":
             self.last_error = "PLACE PACKAGE IN ZONE 1"
+            self.start_candidate = resolved
             return self.summary(provider, now)
         self.session_index += 1
         self.status = "RUNNING"
         self.session_id = f"HUB-JOURNEY-{self.session_index:04d}"
-        self.marker_id = _marker_key(obs)
+        self.identity = resolved["identity"]
+        self.provider = resolved.get("source") or provider
         self.started_at = now
         self.stopped_at = None
         self.current_zone = "ZONE_1"
@@ -264,17 +324,43 @@ class HubJourneySession:
         self.completed = False
         self.last_error = None
         self.last_transition = None
-        return self.summary(provider, now)
+        self.locked_bbox = resolved.get("bbox")
+        self.locked_centroid = resolved.get("centroid")
+        self.target_missing_since = None
+        self.paused_at = None
+        self.target_status = "LOCKED"
+        self.start_candidate = resolved
+        self.latest_candidate = resolved
+        return self.summary(self.provider, now)
 
-    def update(self, observations: list[dict], width: int, height: int, provider: str, now: float | None = None) -> dict:
+    def update(self, candidate: dict | list[dict] | None, width: int, height: int, provider: str, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         self.last_transition = None
+        resolved = self._coerce_candidate(candidate, width, height, provider)
+        self.latest_candidate = resolved or self.latest_candidate
         if self.status != "RUNNING":
             return self.summary(provider, now)
-        obs = self._find_active_observation(observations)
-        if not obs:
-            return self.summary(provider, now)
-        zone = self.zone_for(obs["center"], width, height)
+        if not resolved:
+            if self.target_missing_since is None:
+                self.target_missing_since = now
+            if now - self.target_missing_since > 0.5 and self.paused_at is None:
+                if self.current_zone in self.zone_durations and self.zone_entered_at is not None:
+                    self.zone_durations[self.current_zone] += max(0.0, now - self.zone_entered_at) * self.time_multiplier
+                self.paused_at = now
+                self.target_status = "TARGET TEMPORARILY LOST"
+            if now - self.target_missing_since > 1.5:
+                self.target_status = "TARGET LOST - STOP OR RESET"
+            return self.summary(self.provider or provider, now)
+        if self.identity and resolved.get("identity") != self.identity and self.provider == "ARUCO_IDENTITY":
+            return self.summary(self.provider, now)
+        if self.paused_at is not None:
+            self.zone_entered_at = now
+            self.paused_at = None
+        self.target_missing_since = None
+        self.target_status = "LOCKED"
+        self.locked_bbox = resolved.get("bbox") or self.locked_bbox
+        self.locked_centroid = resolved.get("centroid") or self.locked_centroid
+        zone = self.zone_for(resolved["centroid"], width, height)
         if zone and zone != self.current_zone:
             old_zone = self.current_zone
             if old_zone in self.zone_durations and self.zone_entered_at is not None:
@@ -283,69 +369,88 @@ class HubJourneySession:
             self.current_zone = zone
             self.zone_entered_at = now
             self.transition_count += 1
-            self.last_transition = {"track_id": _display_marker(self.marker_id), "from": old_zone, "to": zone}
-        return self.summary(provider, now)
+            self.last_transition = {"track_id": self.identity, "from": old_zone, "to": zone}
+        return self.summary(self.provider or provider, now)
 
     def stop(self, provider: str = "ARUCO_IDENTITY", now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        if self.status == "RUNNING" and self.current_zone in self.zone_durations and self.zone_entered_at is not None:
+        if self.status == "RUNNING" and self.current_zone in self.zone_durations and self.zone_entered_at is not None and self.paused_at is None:
             self.zone_durations[self.current_zone] += max(0.0, now - self.zone_entered_at) * self.time_multiplier
         if self.status == "RUNNING":
             self.status = "COMPLETED"
             self.completed = True
             self.stopped_at = now
             self.zone_entered_at = now
-        return self.summary(provider, now)
+            self.target_status = "COMPLETED"
+        return self.summary(self.provider or provider, now)
 
     def _live_durations(self, now: float) -> dict[str, float]:
         durations = dict(self.zone_durations)
-        if self.status == "RUNNING" and self.current_zone in durations and self.zone_entered_at is not None:
+        if self.status == "RUNNING" and self.paused_at is None and self.current_zone in durations and self.zone_entered_at is not None:
             durations[self.current_zone] += max(0.0, now - self.zone_entered_at) * self.time_multiplier
         return durations
 
-    def _projection(self, durations: dict[str, float]) -> tuple[float | None, float, str]:
-        baseline_total = self.baseline_total_seconds
-        if baseline_total <= 0:
-            return None, 0.0, "LOW"
-        if self.status == "READY":
-            return None, 0.0, "LOW"
-        if self.status == "COMPLETED":
-            projected = sum(durations.values())
-        elif self.current_zone == "ZONE_1":
-            projected = durations["ZONE_1"] * baseline_total / max(self.baseline_seconds["ZONE_1"], 0.001)
-        elif self.current_zone == "ZONE_2":
-            elapsed = durations["ZONE_1"] + durations["ZONE_2"]
-            baseline = self.baseline_seconds["ZONE_1"] + self.baseline_seconds["ZONE_2"]
-            projected = elapsed * baseline_total / max(baseline, 0.001)
+    def _stage_factors(self, durations: dict[str, float]) -> dict[str, float]:
+        return {
+            zone: durations[zone] / max(float(self.demo_baseline_seconds.get(zone, 0)), 0.001)
+            for zone in ["ZONE_1", "ZONE_2", "ZONE_3"]
+        }
+
+    def _projection(self, durations: dict[str, float]) -> dict:
+        real_total = self.real_baseline_total_hours
+        factors = self._stage_factors(durations)
+        if real_total <= 0 or self.status == "READY":
+            projected = real_total
+        elif self.current_zone == "ZONE_1" and self.status != "COMPLETED":
+            projected = real_total * factors["ZONE_1"]
+        elif self.current_zone == "ZONE_2" and self.status != "COMPLETED":
+            weighted = (
+                self.real_baseline_hours["ZONE_1"] * factors["ZONE_1"]
+                + self.real_baseline_hours["ZONE_2"] * factors["ZONE_2"]
+            ) / max(self.real_baseline_hours["ZONE_1"] + self.real_baseline_hours["ZONE_2"], 0.001)
+            projected = real_total * weighted
         else:
-            projected = sum(durations.values())
-        delay = max(0.0, projected - baseline_total)
-        if projected <= baseline_total:
-            risk = "LOW"
-        elif projected <= baseline_total * 1.25:
-            risk = "MODERATE"
-        elif projected <= baseline_total * 1.50:
-            risk = "HIGH"
+            projected = sum(self.real_baseline_hours[zone] * factors[zone] for zone in ["ZONE_1", "ZONE_2", "ZONE_3"])
+        delay = max(0.0, projected - real_total)
+        ratio = projected / real_total if real_total else 1.0
+        if ratio <= 1.0:
+            level = "ON_TIME"
+        elif ratio <= 1.10:
+            level = "LOW"
+        elif ratio <= 1.25:
+            level = "MODERATE"
+        elif ratio <= 1.50:
+            level = "HIGH"
         else:
-            risk = "CRITICAL"
-        return projected, delay, risk
+            level = "CRITICAL"
+        score = max(0.0, min(100.0, ((ratio - 1.0) / 0.50) * 100.0))
+        return {
+            "stage_factors": factors,
+            "projected_real_dwell_hours": projected,
+            "estimated_delay_hours": delay,
+            "delay_ratio": ratio,
+            "risk_level": level,
+            "risk_score": score,
+        }
 
     def summary(self, provider: str = "ARUCO_IDENTITY", now: float | None = None) -> dict:
         now = time.time() if now is None else now
         durations = self._live_durations(now)
-        projected, delay, risk = self._projection(durations)
+        projection = self._projection(durations)
         actual_total = sum(durations.values())
-        final_delay = max(0.0, actual_total - self.baseline_total_seconds) if self.status == "COMPLETED" else None
-        risk_changed = risk != self.last_risk_level
-        self.last_risk_level = risk
+        risk_changed = projection["risk_level"] != self.last_risk_level
+        self.last_risk_level = projection["risk_level"]
+        candidate = self.latest_candidate or self.start_candidate
         return {
-            "provider": provider,
+            "provider": self.provider or provider,
+            "active_provider": self.provider or provider,
             "configured": True,
             "zones": self.config.get("zones", []),
             "session_id": self.session_id,
             "status": self.status,
             "journey_status": self.status,
-            "marker_id": _display_marker(self.marker_id) if self.marker_id else None,
+            "marker_id": self.identity,
+            "identity": self.identity,
             "started_at": self.started_at,
             "stopped_at": self.stopped_at,
             "current_zone": self.current_zone or "NONE",
@@ -354,39 +459,56 @@ class HubJourneySession:
             "zone_1_seconds": round(durations["ZONE_1"], 1),
             "zone_2_seconds": round(durations["ZONE_2"], 1),
             "zone_3_seconds": round(durations["ZONE_3"], 1),
-            "current_zone_elapsed_seconds": round(max(0.0, now - self.zone_entered_at) * self.time_multiplier, 1) if self.status == "RUNNING" and self.zone_entered_at is not None else 0,
+            "zone_1_demo_seconds": round(durations["ZONE_1"], 1),
+            "zone_2_demo_seconds": round(durations["ZONE_2"], 1),
+            "zone_3_demo_seconds": round(durations["ZONE_3"], 1),
+            "demo_total_seconds": round(actual_total, 1),
             "actual_elapsed_seconds": round(actual_total, 1),
             "actual_total_seconds": round(actual_total, 1) if self.status == "COMPLETED" else None,
-            "baseline_zone_1_seconds": self.baseline_seconds["ZONE_1"],
-            "baseline_zone_2_seconds": self.baseline_seconds["ZONE_2"],
-            "baseline_zone_3_seconds": self.baseline_seconds["ZONE_3"],
-            "baseline_total_seconds": round(self.baseline_total_seconds, 1),
-            "projected_total_seconds": round(projected, 1) if projected is not None else None,
-            "estimated_delay_seconds": round(delay, 1),
-            "final_delay_seconds": round(final_delay, 1) if final_delay is not None else None,
-            "sla_risk_level": risk,
+            "demo_baseline_zone_1_seconds": self.demo_baseline_seconds["ZONE_1"],
+            "demo_baseline_zone_2_seconds": self.demo_baseline_seconds["ZONE_2"],
+            "demo_baseline_zone_3_seconds": self.demo_baseline_seconds["ZONE_3"],
+            "demo_baseline_total_seconds": round(self.baseline_total_seconds, 1),
+            "real_zone_1_hours": self.real_baseline_hours["ZONE_1"],
+            "real_zone_2_hours": self.real_baseline_hours["ZONE_2"],
+            "real_zone_3_hours": self.real_baseline_hours["ZONE_3"],
+            "real_baseline_hours": round(self.real_baseline_total_hours, 2),
+            "projected_real_dwell_hours": round(projection["projected_real_dwell_hours"], 1),
+            "estimated_delay_hours": round(projection["estimated_delay_hours"], 1),
+            "delay_ratio": round(projection["delay_ratio"], 3),
+            "risk_level": projection["risk_level"],
+            "sla_risk_level": projection["risk_level"],
+            "risk_score": round(projection["risk_score"], 1),
+            "stage_factor_zone_1": round(projection["stage_factors"]["ZONE_1"], 2),
+            "stage_factor_zone_2": round(projection["stage_factors"]["ZONE_2"], 2),
+            "stage_factor_zone_3": round(projection["stage_factors"]["ZONE_3"], 2),
             "transition_count": self.transition_count,
             "completed": self.completed,
+            "target_status": self.target_status,
             "last_error": self.last_error,
-            "instruction": "Place package in Receiving and press S" if self.status == "READY" else "Move package through zones, press X to stop",
+            "instruction": "Press H to start journey" if candidate else "Place package in Receiving",
+            "candidate": candidate,
+            "start_candidate": candidate,
             "last_transition": self.last_transition,
             "risk_changed": risk_changed,
             "track_states": [{
-                "track_id": _display_marker(self.marker_id) if self.marker_id else None,
+                "track_id": self.identity,
                 "current_zone": self.current_zone or "NONE",
                 "current_stage": self._zone_name(self.current_zone),
                 "previous_zone": self.previous_zone,
                 "zone_1_seconds": round(durations["ZONE_1"], 1),
                 "zone_2_seconds": round(durations["ZONE_2"], 1),
                 "zone_3_seconds": round(durations["ZONE_3"], 1),
-                "projected_total_seconds": round(projected, 1) if projected is not None else None,
-                "estimated_delay_seconds": round(delay, 1),
-                "sla_risk_level": risk,
+                "projected_real_dwell_hours": round(projection["projected_real_dwell_hours"], 1),
+                "estimated_delay_hours": round(projection["estimated_delay_hours"], 1),
+                "risk_level": projection["risk_level"],
+                "risk_score": round(projection["risk_score"], 1),
                 "transition_count": self.transition_count,
                 "journey_status": self.status,
-            }] if self.marker_id else [],
+            }] if self.identity else [],
             "zone_counts": {self.current_zone: 1} if self.current_zone and self.current_zone != "NONE" else {},
             "changed": bool(self.last_transition or risk_changed),
+            "benchmark_note": "Prototype benchmark assumptions derived from Indonesian logistics references; not universal national averages.",
         }
 
 

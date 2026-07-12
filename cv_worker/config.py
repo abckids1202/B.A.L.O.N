@@ -40,17 +40,28 @@ class WorkerConfig:
     damage_model_path: str = os.getenv("CV_DAMAGE_MODEL_PATH", "models/cv/damage_detector/v1/damage_detector.pth")
     tracker: str = os.getenv("CV_TRACKER", "marker_identity")
     loading_tracking_provider: str = os.getenv("CV_LOADING_TRACKING_PROVIDER", "aruco").lower()
-    hub_tracking_provider: str = os.getenv("CV_HUB_TRACKING_PROVIDER", "aruco").lower()
+    hub_tracking_provider: str = os.getenv("CV_HUB_TRACKING_PROVIDER", "auto").lower()
     event_snapshot_enabled: bool = _bool("CV_EVENT_SNAPSHOT_ENABLED", True)
     backend_event_enabled: bool = _bool("CV_BACKEND_EVENT_ENABLED", True)
     demo_time_multiplier: float = float(os.getenv("CV_DEMO_TIME_MULTIPLIER", "1"))
-    hub_zone_1_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_1_BASELINE_SECONDS", "5"))
-    hub_zone_2_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_2_BASELINE_SECONDS", "8"))
-    hub_zone_3_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_3_BASELINE_SECONDS", "4"))
+    hub_demo_zone_1_seconds: float = float(os.getenv("CV_HUB_DEMO_ZONE_1_SECONDS", "10"))
+    hub_demo_zone_2_seconds: float = float(os.getenv("CV_HUB_DEMO_ZONE_2_SECONDS", "10"))
+    hub_demo_zone_3_seconds: float = float(os.getenv("CV_HUB_DEMO_ZONE_3_SECONDS", "4"))
+    hub_real_zone_1_hours: float = float(os.getenv("CV_HUB_REAL_ZONE_1_HOURS", "72.48"))
+    hub_real_zone_2_hours: float = float(os.getenv("CV_HUB_REAL_ZONE_2_HOURS", "72.00"))
+    hub_real_zone_3_hours: float = float(os.getenv("CV_HUB_REAL_ZONE_3_HOURS", "3.50"))
+
+    @property
+    def hub_demo_baseline_seconds(self) -> dict[str, float]:
+        return {"ZONE_1": self.hub_demo_zone_1_seconds, "ZONE_2": self.hub_demo_zone_2_seconds, "ZONE_3": self.hub_demo_zone_3_seconds}
+
+    @property
+    def hub_real_baseline_hours(self) -> dict[str, float]:
+        return {"ZONE_1": self.hub_real_zone_1_hours, "ZONE_2": self.hub_real_zone_2_hours, "ZONE_3": self.hub_real_zone_3_hours}
 
     @property
     def hub_baseline_seconds(self) -> dict[str, float]:
-        return {"ZONE_1": self.hub_zone_1_baseline_seconds, "ZONE_2": self.hub_zone_2_baseline_seconds, "ZONE_3": self.hub_zone_3_baseline_seconds}
+        return self.hub_demo_baseline_seconds
 
 
 config = WorkerConfig()

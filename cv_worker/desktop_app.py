@@ -110,14 +110,16 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
             f"Dispatch: {loading.get('dispatch_state', 'READY')}",
             f"Recommendation: {loading.get('recommendation', '-')}",
         ]
+    candidate = hub.get("candidate") or hub.get("start_candidate") or {}
+    candidate_label = f"{candidate.get('label', '-') } {candidate.get('confidence', 0):.0%} {candidate.get('zone', '-')}" if candidate else "-"
     return [
         f"Journey: {hub.get('status', 'READY')}",
-        f"Stage: {hub.get('current_stage', 'NONE')}",
-        f"Zone 1: {hub.get('zone_1_seconds', 0)}s / base {hub.get('baseline_zone_1_seconds', 5)}s",
-        f"Zone 2: {hub.get('zone_2_seconds', 0)}s / base {hub.get('baseline_zone_2_seconds', 8)}s",
-        f"Zone 3: {hub.get('zone_3_seconds', 0)}s / base {hub.get('baseline_zone_3_seconds', 4)}s",
-        f"Projected: {hub.get('projected_total_seconds', '-')}s Delay: {hub.get('estimated_delay_seconds', 0)}s",
-        f"Risk: {hub.get('sla_risk_level', 'LOW')} Total: {hub.get('actual_total_seconds') or hub.get('actual_elapsed_seconds', 0)}s",
+        f"Configured: {status.get('configured_hub_tracking')} Active: {hub.get('active_provider', status.get('tracker_status'))}",
+        f"Candidate: {candidate_label}",
+        f"Stage: {hub.get('current_stage', 'NONE')} Target: {hub.get('target_status', '-')}",
+        f"Z1/Z2/Z3: {hub.get('zone_1_seconds', 0)}s / {hub.get('zone_2_seconds', 0)}s / {hub.get('zone_3_seconds', 0)}s",
+        f"Projected dwell: {hub.get('projected_real_dwell_hours', '-')}h",
+        f"Delay: {hub.get('estimated_delay_hours', 0)}h Risk: {hub.get('risk_level', 'ON_TIME')} {hub.get('risk_score', 0)}/100",
     ]
 
 
@@ -244,7 +246,7 @@ def _annotate(cv2, frame):
     cv2.circle(canvas, (626, 648), 7, delivered_dot, -1)
     footer = f"FPS {status['camera_fps']:.1f} | Latency {status['latency_ms']:.0f} ms | Event {status['delivery_status']} | Queue {status['pending_events']} | Backend {'ON' if status['backend_enabled'] else 'OFF'}"
     _text(cv2, canvas, footer, 36, 654, .62, (226, 232, 240), 1)
-    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [S Start/Capture] [X Stop] [R Reset] [A Analyze] [E Emit] [B Backend] [Q Quit]", 36, 688, .50, (226, 232, 240), 1)
+    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [S Loading Snapshot] [H Hub Start] [X Hub Stop] [R Reset] [A Analyze] [E Emit] [Q Quit]", 36, 688, .48, (226, 232, 240), 1)
     return canvas
 
 
@@ -272,6 +274,8 @@ def run_desktop(camera_index: int = 0, source_video: str | None = None) -> None:
                 break
             elif key == ord("s"):
                 runtime.start_active_module(frame)
+            elif key == ord("h"):
+                runtime.start_hub_module(frame)
             elif key == ord("x"):
                 runtime.stop_active_module()
             elif key == ord("p"):

@@ -1,4 +1,4 @@
-from cv_worker.tracking.marker_logic import HubJourneySession, LoadingInspectionState
+from cv_worker.tracking.marker_logic import HubJourneySession, LoadingInspectionState, make_marker_candidate, make_yolo_candidate
 
 
 def det(x1, y1, x2, y2, confidence=0.9, raw_class="Large_Box"):
@@ -11,14 +11,18 @@ def det(x1, y1, x2, y2, confidence=0.9, raw_class="Large_Box"):
     }
 
 
-def marker(x, y=300, marker_id=1):
-    return [{
+def marker_candidate(x, y=300, marker_id=1, zone="ZONE_1"):
+    return make_marker_candidate({
         "track_id": f"MARKER-{marker_id}",
         "marker_id": marker_id,
         "center": [x, y],
         "bbox": [x - 10, y - 10, x + 10, y + 10],
         "source": "ARUCO",
-    }]
+    }, zone=zone)
+
+
+def yolo_candidate(x1, y1, x2, y2, zone="ZONE_1", confidence=0.9, stable=3):
+    return make_yolo_candidate(det(x1, y1, x2, y2, confidence=confidence), zone=zone, stable_frames=stable)
 
 
 def test_loading_snapshot_counts_once_and_freezes_until_recapture():
@@ -29,9 +33,7 @@ def test_loading_snapshot_counts_once_and_freezes_until_recapture():
     assert result["detected_package_count"] == 1
     assert result["loaded_packages"] == 1
     assert result["dispatch_state"] == "READY"
-
-    frozen = state.summary(0.75)
-    assert frozen["detected_package_count"] == 1
+    assert state.summary(0.75)["detected_package_count"] == 1
 
 
 def test_loading_snapshot_over_capacity_and_dedupes_overlap():
@@ -57,56 +59,85 @@ def test_loading_reset_and_second_snapshot_replaces_result():
     state = LoadingInspectionState()
     state.capture([det(500, 200, 620, 360)], 1000, 600, 0.75)
     state.reset()
-    ready = state.summary(0.75)
-    assert ready["status"] == "READY"
-    assert ready["detected_package_count"] == 0
+    assert state.summary(0.75)["status"] == "READY"
 
     result = state.capture([det(500, 100, 590, 210), det(610, 100, 700, 210)], 1000, 600, 0.75)
     assert result["detected_package_count"] == 2
     assert result["snapshot_id"] == "LOAD-SNAPSHOT-0002"
 
 
-def test_hub_start_requires_marker_in_zone_1():
-    hub = HubJourneySession(baseline_seconds={"ZONE_1": 5, "ZONE_2": 8, "ZONE_3": 4})
-    result = hub.start(marker(700), 900, 600, "ARUCO_IDENTITY", now=100)
+def test_hub_start_requires_candidate_in_zone_1():
+    hub = HubJourneySession()
+    result = hub.start(yolo_candidate(650, 100, 760, 260, zone="ZONE_3"), 900, 600, "YOLO_SINGLE_PACKAGE", now=100)
 
     assert result["status"] == "READY"
     assert result["last_error"] == "PLACE PACKAGE IN ZONE 1"
 
 
-def test_hub_projection_zone_1_and_zone_2_formula():
-    hub = HubJourneySession(baseline_seconds={"ZONE_1": 5, "ZONE_2": 8, "ZONE_3": 4})
-    hub.start(marker(100), 900, 600, "ARUCO_IDENTITY", now=100)
-    zone_1 = hub.update(marker(100), 900, 600, "ARUCO_IDENTITY", now=107)
-    assert zone_1["zone_1_seconds"] == 7.0
-    assert zone_1["projected_total_seconds"] == 23.8
-    assert zone_1["estimated_delay_seconds"] == 6.8
-    assert zone_1["sla_risk_level"] == "HIGH"
+def test_hub_yolo_candidate_can_start_without_marker():
+    hub = HubJourneySession()
+    started = hub.start(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=100)
 
-    hub.update(marker(450), 900, 600, "ARUCO_IDENTITY", now=107)
-    zone_2 = hub.update(marker(450), 900, 600, "ARUCO_IDENTITY", now=117)
-    assert zone_2["zone_1_seconds"] == 7.0
-    assert zone_2["zone_2_seconds"] == 10.0
-    assert zone_2["projected_total_seconds"] == 22.2
-    assert zone_2["estimated_delay_seconds"] == 5.2
-    assert zone_2["transition_count"] == 1
+    assert started["status"] == "RUNNING"
+    assert started["provider"] == "YOLO_SINGLE_PACKAGE"
+    assert started["identity"] == "YOLO-PACKAGE-01"
 
 
-def test_hub_stop_freezes_actual_total_and_reset_restarts():
-    hub = HubJourneySession(baseline_seconds={"ZONE_1": 5, "ZONE_2": 8, "ZONE_3": 4})
-    hub.start(marker(100), 900, 600, "ARUCO_IDENTITY", now=100)
-    hub.update(marker(450), 900, 600, "ARUCO_IDENTITY", now=107)
-    hub.update(marker(800), 900, 600, "ARUCO_IDENTITY", now=117)
-    stopped = hub.stop(now=122)
+def test_hub_projection_zone_1_and_zone_2_weighted_formula():
+    hub = HubJourneySession(
+        demo_baseline_seconds={"ZONE_1": 10, "ZONE_2": 10, "ZONE_3": 4},
+        real_baseline_hours={"ZONE_1": 72.48, "ZONE_2": 72.0, "ZONE_3": 3.5},
+    )
+    hub.start(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=100)
+    zone_1 = hub.update(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=113)
+    assert zone_1["zone_1_seconds"] == 13.0
+    assert zone_1["stage_factor_zone_1"] == 1.3
+    assert zone_1["projected_real_dwell_hours"] == 192.4
+    assert zone_1["estimated_delay_hours"] == 44.4
+    assert zone_1["risk_level"] == "HIGH"
+
+    hub.update(yolo_candidate(370, 100, 520, 260, zone="ZONE_2"), 900, 600, "YOLO_SINGLE_PACKAGE", now=113)
+    zone_2 = hub.update(yolo_candidate(370, 100, 520, 260, zone="ZONE_2"), 900, 600, "YOLO_SINGLE_PACKAGE", now=121)
+    assert zone_2["zone_1_seconds"] == 13.0
+    assert zone_2["zone_2_seconds"] == 8.0
+    assert zone_2["projected_real_dwell_hours"] == 155.5
+    assert zone_2["estimated_delay_hours"] == 7.5
+    assert zone_2["risk_level"] == "LOW"
+
+
+def test_hub_stop_freezes_projected_real_dwell_and_reset_restarts():
+    hub = HubJourneySession(
+        demo_baseline_seconds={"ZONE_1": 10, "ZONE_2": 10, "ZONE_3": 4},
+        real_baseline_hours={"ZONE_1": 72.48, "ZONE_2": 72.0, "ZONE_3": 3.5},
+    )
+    hub.start(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=100)
+    hub.update(yolo_candidate(370, 100, 520, 260, zone="ZONE_2"), 900, 600, "YOLO_SINGLE_PACKAGE", now=113)
+    hub.update(yolo_candidate(700, 100, 850, 260, zone="ZONE_3"), 900, 600, "YOLO_SINGLE_PACKAGE", now=124)
+    stopped = hub.stop(now=127)
 
     assert stopped["status"] == "COMPLETED"
-    assert stopped["zone_1_seconds"] == 7.0
-    assert stopped["zone_2_seconds"] == 10.0
-    assert stopped["zone_3_seconds"] == 5.0
-    assert stopped["actual_total_seconds"] == 22.0
-    assert stopped["final_delay_seconds"] == 5.0
+    assert stopped["demo_total_seconds"] == 27.0
+    assert stopped["zone_1_demo_seconds"] == 13.0
+    assert stopped["zone_2_demo_seconds"] == 11.0
+    assert stopped["zone_3_demo_seconds"] == 3.0
+    assert stopped["projected_real_dwell_hours"] == 176.0
+    assert stopped["estimated_delay_hours"] == 28.1
+    assert stopped["risk_level"] == "MODERATE"
 
     hub.reset()
-    restarted = hub.start(marker(100), 900, 600, "ARUCO_IDENTITY", now=200)
+    restarted = hub.start(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=200)
     assert restarted["status"] == "RUNNING"
     assert restarted["zone_1_seconds"] == 0.0
+
+
+def test_hub_missing_target_enters_lost_state_after_grace():
+    hub = HubJourneySession()
+    hub.start(yolo_candidate(80, 100, 230, 260, zone="ZONE_1"), 900, 600, "YOLO_SINGLE_PACKAGE", now=100)
+    first_missing = hub.update(None, 900, 600, "YOLO_SINGLE_PACKAGE", now=101)
+    paused = hub.update(None, 900, 600, "YOLO_SINGLE_PACKAGE", now=101.6)
+    lost = hub.update(None, 900, 600, "YOLO_SINGLE_PACKAGE", now=102.6)
+
+    assert first_missing["target_status"] == "LOCKED"
+    assert paused["target_status"] == "TARGET TEMPORARILY LOST"
+    assert lost["target_status"] == "TARGET LOST - STOP OR RESET"
+
