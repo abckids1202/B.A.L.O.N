@@ -16,7 +16,7 @@ MODE_LABELS = {
     "PACKAGE_QUALITY": "Package Quality",
     "DISPATCH_VALIDATION": "Dispatch Validation",
     "LOADING_COMPLIANCE": "Loading Compliance",
-    "HUB_VISION": "Hub Congestion",
+    "HUB_VISION": "Hub Journey",
 }
 
 
@@ -93,27 +93,31 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
             f"Dispatch: {payload.get('dispatch_state', 'PENDING')}",
         ]
     if mode == "LOADING_COMPLIANCE":
-        loaded_ids = loading.get("loaded_marker_ids") or loading.get("loaded_track_ids") or []
-        visible_ids = loading.get("visible_marker_ids") or []
-        capacity_status = str(loading.get("capacity_status", "WITHIN_LIMIT")).replace("_", " ")
+        if loading.get("status") == "READY":
+            return [
+                "Inspection: READY",
+                "Instruction: Arrange boxes inside ROI",
+                "Press S: Capture and count",
+                f"Loaded: 0/{loading.get('visual_capacity', 5)}",
+                "Dispatch: READY",
+            ]
         return [
-            f"Tracking: {status.get('configured_loading_tracking')} / {status.get('tracker_status')}",
-            f"Visible Markers: {', '.join(visible_ids[:4]) if visible_ids else 'show ArUco markers'}",
-            f"Loaded: {loading.get('loaded_packages', 0)}/{loading.get('visual_capacity', 5)}",
-            f"Capacity: {capacity_status}",
-            f"Dispatch: {loading.get('dispatch_state', loading.get('status', 'READY'))}",
-            f"Loaded IDs: {', '.join(loaded_ids[:4]) if loaded_ids else '-'}",
-            f"Events: {loading.get('entry_events', 0)} in / {loading.get('exit_events', 0)} out",
+            f"Inspection: {loading.get('status', 'READY')}",
+            f"Packages in ROI: {loading.get('detected_package_count', 0)}",
+            f"Maximum: {loading.get('configured_limit', 5)}",
+            f"Excess: {loading.get('excess_count', 0)}",
+            f"Capacity: {str(loading.get('capacity_status', 'WITHIN_LIMIT')).replace('_', ' ')}",
+            f"Dispatch: {loading.get('dispatch_state', 'READY')}",
+            f"Recommendation: {loading.get('recommendation', '-')}",
         ]
-    track = (hub.get("track_states") or [{}])[-1]
     return [
-        f"Tracking: {status.get('configured_hub_tracking')} / {status.get('tracker_status')}",
-        f"Current Stage: {track.get('current_stage', hub.get('current_stage', 'WAITING'))}",
-        f"Zone 1 Receiving: {track.get('zone_1_seconds', 0)}s",
-        f"Zone 2 Processing: {track.get('zone_2_seconds', 0)}s",
-        f"Zone 3 Dispatch: {track.get('zone_3_seconds', 0)}s",
-        f"Risk / Total: {track.get('cumulative_risk', 'LOW')} / {track.get('total_journey_seconds', 0)}s",
-        f"Transitions: {track.get('transition_count', 0)}",
+        f"Journey: {hub.get('status', 'READY')}",
+        f"Stage: {hub.get('current_stage', 'NONE')}",
+        f"Zone 1: {hub.get('zone_1_seconds', 0)}s / base {hub.get('baseline_zone_1_seconds', 5)}s",
+        f"Zone 2: {hub.get('zone_2_seconds', 0)}s / base {hub.get('baseline_zone_2_seconds', 8)}s",
+        f"Zone 3: {hub.get('zone_3_seconds', 0)}s / base {hub.get('baseline_zone_3_seconds', 4)}s",
+        f"Projected: {hub.get('projected_total_seconds', '-')}s Delay: {hub.get('estimated_delay_seconds', 0)}s",
+        f"Risk: {hub.get('sla_risk_level', 'LOW')} Total: {hub.get('actual_total_seconds') or hub.get('actual_elapsed_seconds', 0)}s",
     ]
 
 
@@ -167,10 +171,13 @@ def _draw_operational_guides(cv2, frame, status):
 def _draw_analysis(cv2, frame, status):
     analysis = status.get("latest_analysis") or {}
     frame = _draw_operational_guides(cv2, frame, status)
-    for item in analysis.get("detections") or []:
+    draw_detections = analysis.get("detections") or []
+    if status.get("active_mode") == "LOADING_COMPLIANCE" and (analysis.get("loading") or {}).get("status") == "COMPLETED":
+        draw_detections = (analysis.get("loading") or {}).get("valid_detections") or []
+    for item in draw_detections:
         x1, y1, x2, y2 = [int(v) for v in item["bbox"]]
         cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
-        _text(cv2, frame, f"{item['raw_class']} {item['confidence']:.0%}", x1, max(20, y1 - 8), .55, (34, 197, 94), 2)
+        _text(cv2, frame, f"{item.get('raw_class', 'PACKAGE')} {item.get('confidence', 0):.0%}", x1, max(20, y1 - 8), .55, (34, 197, 94), 2)
     for marker in analysis.get("tracking_observations") or []:
         x1, y1, x2, y2 = [int(v) for v in marker["bbox"]]
         cv2.rectangle(frame, (x1, y1), (x2, y2), (59, 130, 246), 2)
@@ -237,7 +244,7 @@ def _annotate(cv2, frame):
     cv2.circle(canvas, (626, 648), 7, delivered_dot, -1)
     footer = f"FPS {status['camera_fps']:.1f} | Latency {status['latency_ms']:.0f} ms | Event {status['delivery_status']} | Queue {status['pending_events']} | Backend {'ON' if status['backend_enabled'] else 'OFF'}"
     _text(cv2, canvas, footer, 36, 654, .62, (226, 232, 240), 1)
-    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [A Analyze] [E Emit] [R Reset] [F1/F2 Context] [B Backend] [Q Quit]", 36, 688, .56, (226, 232, 240), 1)
+    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [S Start/Capture] [X Stop] [R Reset] [A Analyze] [E Emit] [B Backend] [Q Quit]", 36, 688, .50, (226, 232, 240), 1)
     return canvas
 
 
@@ -264,7 +271,9 @@ def run_desktop(camera_index: int = 0, source_video: str | None = None) -> None:
             elif key in {ord("q"), 27}:
                 break
             elif key == ord("s"):
-                runtime.camera.start()
+                runtime.start_active_module(frame)
+            elif key == ord("x"):
+                runtime.stop_active_module()
             elif key == ord("p"):
                 runtime.camera.stop()
             elif key == ord("r"):

@@ -44,6 +44,13 @@ class WorkerConfig:
     event_snapshot_enabled: bool = _bool("CV_EVENT_SNAPSHOT_ENABLED", True)
     backend_event_enabled: bool = _bool("CV_BACKEND_EVENT_ENABLED", True)
     demo_time_multiplier: float = float(os.getenv("CV_DEMO_TIME_MULTIPLIER", "1"))
+    hub_zone_1_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_1_BASELINE_SECONDS", "5"))
+    hub_zone_2_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_2_BASELINE_SECONDS", "8"))
+    hub_zone_3_baseline_seconds: float = float(os.getenv("CV_HUB_ZONE_3_BASELINE_SECONDS", "4"))
+
+    @property
+    def hub_baseline_seconds(self) -> dict[str, float]:
+        return {"ZONE_1": self.hub_zone_1_baseline_seconds, "ZONE_2": self.hub_zone_2_baseline_seconds, "ZONE_3": self.hub_zone_3_baseline_seconds}
 
 
 config = WorkerConfig()

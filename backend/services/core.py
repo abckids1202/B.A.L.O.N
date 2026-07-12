@@ -827,7 +827,16 @@ CV_EVENT_TYPES = {
     "PACKAGE_LOADING_MISMATCH": {"module": "DISPATCH_VALIDATION", "signal_type": "WRONG_PACKAGE_LOADING_DETECTED"},
     "PACKAGE_LOADING_VALIDATED": {"module": "DISPATCH_VALIDATION", "signal_type": "WRONG_PACKAGE_LOADING_DETECTED"},
     "LOAD_COMPLIANCE_UPDATED": {"module": "LOADING_COMPLIANCE", "signal_type": "LOADING_COMPLIANCE_UPDATED"},
+    "LOAD_SNAPSHOT_ANALYZED": {"module": "LOADING_COMPLIANCE", "signal_type": "LOADING_COMPLIANCE_UPDATED"},
+    "LOADING_COMPLIANCE_VALIDATED": {"module": "LOADING_COMPLIANCE", "signal_type": "LOADING_COMPLIANCE_UPDATED"},
+    "PROTOTYPE_LOAD_LIMIT_EXCEEDED": {"module": "LOADING_COMPLIANCE", "signal_type": "LOADING_COMPLIANCE_UPDATED"},
     "HUB_VISUAL_CONGESTION_CHANGED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_JOURNEY_STARTED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_PACKAGE_MOVED_TO_PROCESSING": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_PACKAGE_MOVED_TO_DISPATCH": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_PROJECTED_DELAY_CHANGED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_SLA_RISK_CHANGED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
+    "HUB_JOURNEY_COMPLETED": {"module": "HUB_VISION", "signal_type": "HUB_VISUAL_OCCUPANCY_DETECTED"},
 }
 
 
@@ -902,14 +911,14 @@ def _process_cv_operational_effect(event: dict, payload: dict) -> dict:
     if event_type in {"PACKAGE_LOADING_MISMATCH", "PACKAGE_LOADING_VALIDATED"}:
         observed = event.get("vehicle_id") or payload.get("observed_vehicle_id") or payload.get("current_vehicle_id")
         return process_wrong_loading_signal(event.get("shipment_id") or "SHP-1028", observed)
-    if event_type == "LOAD_COMPLIANCE_UPDATED":
+    if event_type in {"LOAD_COMPLIANCE_UPDATED", "LOAD_SNAPSHOT_ANALYZED", "LOADING_COMPLIANCE_VALIDATED", "PROTOTYPE_LOAD_LIMIT_EXCEEDED"}:
         return run_loading_compliance_workflow(
             event.get("vehicle_id") or payload.get("vehicle_id") or "TRK-001",
-            int(payload.get("loaded_packages") or payload.get("current_count") or 6),
-            int(payload.get("visual_capacity") or payload.get("capacity") or 5),
+            int(payload.get("detected_package_count") or payload.get("loaded_packages") or payload.get("current_count") or 0),
+            int(payload.get("configured_limit") or payload.get("visual_capacity") or payload.get("capacity") or 5),
         )
-    if event_type == "HUB_VISUAL_CONGESTION_CHANGED":
-        return run_hub_vision_workflow(event.get("hub_id") or "HUB-JKT", int(payload.get("observed_packages") or payload.get("queue_length") or 42))
+    if event_type in {"HUB_VISUAL_CONGESTION_CHANGED", "HUB_JOURNEY_STARTED", "HUB_PACKAGE_MOVED_TO_PROCESSING", "HUB_PACKAGE_MOVED_TO_DISPATCH", "HUB_PROJECTED_DELAY_CHANGED", "HUB_SLA_RISK_CHANGED", "HUB_JOURNEY_COMPLETED"}:
+        return run_hub_vision_workflow(event.get("hub_id") or "HUB-JKT", int(payload.get("observed_packages") or payload.get("active_marker_count") or 1))
     raise ValueError(f"No processor for {event_type}")
 
 

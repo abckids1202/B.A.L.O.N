@@ -13,7 +13,7 @@ from cv_worker.detectors.qr_reader import QRReader
 from cv_worker.model_registry import damage_model, package_model, registry
 from cv_worker.services.event_client import EventClient
 from cv_worker.tracking.centroid_tracker import CentroidTracker
-from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubState, LoadingState
+from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubJourneySession, LoadingInspectionState
 
 
 def observed_short(value: str | None) -> str:
@@ -67,8 +67,8 @@ class CVRuntime:
         self.event_client = EventClient(config.backend_url)
         self.qr_reader = QRReader()
         self.marker_reader = MarkerReader()
-        self.loading_state = LoadingState(limit=5, config=self._load_json_config("config/cv/loading_roi.json", DEFAULT_LOADING_CONFIG))
-        self.hub_state = HubState(time_multiplier=config.demo_time_multiplier, config=self._load_json_config("config/cv/hub_zones.json", DEFAULT_HUB_ZONES))
+        self.loading_state = LoadingInspectionState(limit=5, config=self._load_json_config("config/cv/loading_roi.json", DEFAULT_LOADING_CONFIG))
+        self.hub_state = HubJourneySession(time_multiplier=config.demo_time_multiplier, config=self._load_json_config("config/cv/hub_zones.json", DEFAULT_HUB_ZONES), baseline_seconds=config.hub_baseline_seconds)
         self.yolo_tracker = CentroidTracker()
         self.active_context_name = "WRONG"
         self.active_context = CONTEXTS[self.active_context_name]
@@ -77,6 +77,8 @@ class CVRuntime:
         self._last_qr_emit: dict[str, float] = {}
         self._last_loading_count: int | None = None
         self._last_hub_level: str | None = None
+        self._last_hub_risk_event: str | None = None
+        self._last_hub_projection_bucket: int | None = None
         self.last_emit_error: str | None = None
 
 
@@ -123,6 +125,8 @@ class CVRuntime:
             self.hub_state.reset()
             self.yolo_tracker = CentroidTracker()
             self._last_hub_level = None
+            self._last_hub_risk_event = None
+            self._last_hub_projection_bucket = None
         elif self.mode == "DISPATCH_VALIDATION":
             self._last_qr_emit.clear()
         self.last_event = None
@@ -131,7 +135,7 @@ class CVRuntime:
         self.mode_backend_results.pop(self.mode, None)
         self.event_timeline = [item for item in self.event_timeline if item.get("module") != self.mode]
         self.last_emit_error = None
-        self.latest_analysis.update({"tracking_observations": [], "tracking_provider": "NONE", "loading": {}, "hub": {}})
+        self.latest_analysis.update({"tracking_observations": [], "tracking_provider": "NONE", "loading": self.loading_state.summary(config.confidence_threshold), "hub": self.hub_state.summary()})
 
     def set_backend_url(self, backend_url: str) -> None:
         self.event_client.stop()
@@ -160,17 +164,65 @@ class CVRuntime:
         markers = self.marker_reader.scan(frame)
         height, width = frame.shape[:2]
         tracking_provider, observations = self._tracking_observations(markers, detections)
-        loading = self.loading_state.update(observations, width, height, tracking_provider)
-        hub = self.hub_state.update(observations, width, height, tracking_provider)
+        loading = self.loading_state.summary(config.confidence_threshold)
+        hub = self.hub_state.update(observations, width, height, tracking_provider) if self.mode == "HUB_VISION" else self.hub_state.summary(tracking_provider)
         self.latest_analysis = {"detections": detections, "qr": qr, "markers": markers, "tracking_observations": observations, "tracking_provider": tracking_provider, "loading": loading, "hub": hub, "damage": self.latest_analysis.get("damage")}
         if not run_model:
             self.inference_latency_ms = (time.perf_counter() - started) * 1000
         if self.mode == "DISPATCH_VALIDATION" and qr:
             self._maybe_emit_dispatch(qr)
-        elif self.mode == "LOADING_COMPLIANCE":
-            self._maybe_emit_loading(loading)
         elif self.mode == "HUB_VISION":
             self._maybe_emit_hub(hub)
+
+    def start_active_module(self, frame=None) -> dict:
+        if self.mode == "LOADING_COMPLIANCE":
+            return self.capture_loading_snapshot(frame)
+        if self.mode == "HUB_VISION":
+            return self.start_hub_journey(frame)
+        self.last_emit_error = "Start is only used for Loading and Hub modes."
+        return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
+
+    def stop_active_module(self) -> dict:
+        if self.mode == "HUB_VISION":
+            hub = self.hub_state.stop(self.latest_analysis.get("tracking_provider") or "ARUCO_IDENTITY")
+            self.latest_analysis["hub"] = hub
+            if hub.get("status") == "COMPLETED":
+                return self.emit_material_event("HUB_JOURNEY_COMPLETED", hub_id="HUB-JKT", payload=hub, severity=hub.get("sla_risk_level", "INFO"), confidence=0.9)
+            return {"accepted": False, "delivery_status": "NOT_READY", "error": "No running hub journey to stop."}
+        self.last_emit_error = "Stop is only used for Hub Vision."
+        return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
+
+    def capture_loading_snapshot(self, frame=None) -> dict:
+        frame = frame if frame is not None else self.camera.frame()
+        if frame is None:
+            loading = self.loading_state.fail("No camera frame available for snapshot.", config.confidence_threshold)
+            self.latest_analysis["loading"] = loading
+            self.last_emit_error = loading["last_error"]
+            return {"accepted": False, "delivery_status": "FAILED", "error": self.last_emit_error}
+        started = time.perf_counter()
+        model = package_model()
+        result = detect_packages(model, frame, config.confidence_threshold)
+        self.inference_latency_ms = result.get("processing_time_ms", round((time.perf_counter() - started) * 1000, 2))
+        height, width = frame.shape[:2]
+        loading = self.loading_state.capture(result.get("detections", []), width, height, config.confidence_threshold)
+        self.latest_analysis.update({"detections": result.get("detections", []), "loading": loading, "tracking_provider": "SNAPSHOT_YOLO"})
+        event_type = "PROTOTYPE_LOAD_LIMIT_EXCEEDED" if loading["excess_count"] else "LOADING_COMPLIANCE_VALIDATED"
+        return self.emit_material_event(event_type, vehicle_id=self.active_context["current_vehicle_id"], hub_id="HUB-JKT", payload=loading, severity="CRITICAL" if loading["excess_count"] else "INFO", confidence=0.9)
+
+    def start_hub_journey(self, frame=None) -> dict:
+        frame = frame if frame is not None else self.camera.frame()
+        if frame is None:
+            self.last_emit_error = "No camera frame available for hub journey start."
+            return {"accepted": False, "delivery_status": "FAILED", "error": self.last_emit_error}
+        markers = self.marker_reader.scan(frame)
+        height, width = frame.shape[:2]
+        hub = self.hub_state.start(markers, width, height, "ARUCO_IDENTITY")
+        self.latest_analysis.update({"markers": markers, "tracking_observations": markers, "tracking_provider": "ARUCO_IDENTITY", "hub": hub})
+        if hub.get("status") != "RUNNING":
+            self.last_emit_error = hub.get("last_error") or "Place package in Zone 1 and press S."
+            return {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
+        self.last_emit_error = None
+        return self.emit_material_event("HUB_JOURNEY_STARTED", hub_id="HUB-JKT", payload=hub, severity="INFO", confidence=0.9)
 
     def analyze_damage(self, frame) -> dict:
         detector = damage_model()
@@ -222,21 +274,26 @@ class CVRuntime:
         }, severity="INFO" if valid else "CRITICAL", confidence=0.96)
 
     def _maybe_emit_loading(self, loading: dict) -> None:
-        count = int(loading.get("loaded_packages", 0))
-        if self._last_loading_count is None:
-            self._last_loading_count = count
-            return
-        if self._last_loading_count == count:
-            return
-        self._last_loading_count = count
-        self.emit_material_event("LOAD_COMPLIANCE_UPDATED", vehicle_id=self.active_context["current_vehicle_id"], payload=loading, severity="MEDIUM" if not loading.get("dispatch_allowed", True) else "INFO", confidence=0.86)
+        return
 
     def _maybe_emit_hub(self, hub: dict) -> None:
-        level = hub.get("congestion_level")
-        if self._last_hub_level == level and not hub.get("changed"):
+        if hub.get("status") != "RUNNING":
             return
-        self._last_hub_level = level
-        self.emit_material_event("HUB_VISUAL_CONGESTION_CHANGED", hub_id="HUB-JKT", payload={**hub, "observed_packages": sum(hub.get("zone_counts", {}).values())}, severity=level or "INFO", confidence=0.82)
+        transition = hub.get("last_transition")
+        if transition:
+            event_type = "HUB_PACKAGE_MOVED_TO_PROCESSING" if transition.get("to") == "ZONE_2" else "HUB_PACKAGE_MOVED_TO_DISPATCH" if transition.get("to") == "ZONE_3" else None
+            if event_type:
+                self.emit_material_event(event_type, hub_id="HUB-JKT", payload=hub, severity=hub.get("sla_risk_level", "INFO"), confidence=0.88)
+        risk = hub.get("sla_risk_level")
+        if risk and risk != self._last_hub_risk_event:
+            self._last_hub_risk_event = risk
+            self.emit_material_event("HUB_SLA_RISK_CHANGED", hub_id="HUB-JKT", payload=hub, severity=risk, confidence=0.84)
+        projected = hub.get("projected_total_seconds")
+        if projected is not None:
+            bucket = int(float(projected) // 5)
+            if bucket != self._last_hub_projection_bucket:
+                self._last_hub_projection_bucket = bucket
+                self.emit_material_event("HUB_PROJECTED_DELAY_CHANGED", hub_id="HUB-JKT", payload=hub, severity=risk or "INFO", confidence=0.82)
 
     def emit_material_event(self, event_type: str | None = None, **overrides) -> dict:
         event = self._event_for_mode(event_type, **overrides)
@@ -292,10 +349,10 @@ class CVRuntime:
             return {**base, "event_type": event_type}
         if mode == "DISPATCH_VALIDATION" and not qr_payload.get("shipment_id"):
             return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: scan a QR first."}}
-        if mode == "LOADING_COMPLIANCE" and not (self.latest_analysis.get("loading") or {}).get("last_state_change"):
-            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: no loading-state change yet."}}
-        if mode == "HUB_VISION" and not (self.latest_analysis.get("hub") or {}).get("changed"):
-            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: no material hub change yet."}}
+        if mode == "LOADING_COMPLIANCE" and (self.latest_analysis.get("loading") or {}).get("status") != "COMPLETED":
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: press S to capture a loading snapshot first."}}
+        if mode == "HUB_VISION" and (self.latest_analysis.get("hub") or {}).get("status") == "READY":
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: press S to start a hub journey first."}}
         if mode == "PACKAGE_QUALITY":
             shipment_id = qr_payload.get("shipment_id") or "SHP-DMG-001"
             package_id = qr_payload.get("package_id") or "PKG-DMG-001"
@@ -304,9 +361,11 @@ class CVRuntime:
             return {**base, "event_type": "PACKAGE_LOADING_MISMATCH", "shipment_id": qr_payload.get("shipment_id") or "SHP-LOAD-001", "package_id": qr_payload.get("package_id") or "PKG-LOAD-001", "vehicle_id": self.active_context["current_vehicle_id"], "hub_id": "HUB-JKT", "severity": "CRITICAL", "payload": {**base["payload"], "observed_vehicle_id": self.active_context["current_vehicle_id"]}}
         if mode == "LOADING_COMPLIANCE":
             loading = self.latest_analysis.get("loading") or {}
-            return {**base, "event_type": "LOAD_COMPLIANCE_UPDATED", "vehicle_id": self.active_context["current_vehicle_id"], "hub_id": "HUB-JKT", "payload": {**base["payload"], **loading}}
+            event_name = "PROTOTYPE_LOAD_LIMIT_EXCEEDED" if loading.get("excess_count", 0) else "LOADING_COMPLIANCE_VALIDATED"
+            return {**base, "event_type": event_name, "vehicle_id": self.active_context["current_vehicle_id"], "hub_id": "HUB-JKT", "payload": {**base["payload"], **loading}}
         hub = self.latest_analysis.get("hub") or {}
-        return {**base, "event_type": "HUB_VISUAL_CONGESTION_CHANGED", "hub_id": "HUB-JKT", "severity": hub.get("congestion_level", "MEDIUM"), "payload": {**base["payload"], **hub, "observed_packages": sum(hub.get("zone_counts", {}).values())}}
+        event_name = "HUB_JOURNEY_COMPLETED" if hub.get("status") == "COMPLETED" else "HUB_PROJECTED_DELAY_CHANGED"
+        return {**base, "event_type": event_name, "hub_id": "HUB-JKT", "severity": hub.get("sla_risk_level", "MEDIUM"), "payload": {**base["payload"], **hub}}
 
     def status(self) -> dict:
         assets = registry()
@@ -346,7 +405,7 @@ class CVRuntime:
             "latest_analysis": self.latest_analysis,
             "assets": assets,
             "last_emit_error": self.last_emit_error,
-            "worker_version": "local-cv-desktop-v4",
+            "worker_version": "local-cv-desktop-v5-snapshot-journey",
             "note": "Local webcam owns live CV. Web frontend reads status/events and does not need webcam ownership.",
         }
 

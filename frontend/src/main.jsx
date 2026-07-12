@@ -1394,7 +1394,7 @@ function LiveCVWorkspace({ mode, scenario, title }) {
           <b>DETECTION</b>
           <span>{latest ? latest.event_type.replaceAll("_", " ") : "No event yet"}</span>
           <small>{latest ? `${latest.shipment_id || latest.vehicle_id || latest.hub_id || "network"} / ${formatPercent(latest.confidence)}` : "Press E in the local CV window"}</small>
-          <small>{payload.damage_type || payload.validation_result || payload.capacity_status || payload.current_stage || payload.queue_length || "Awaiting real signal"}</small>
+          <small>{payload.damage_type || payload.validation_result || payload.capacity_status || payload.current_stage || payload.detected_package_count || payload.actual_total_seconds || "Awaiting real signal"}</small>
         </article>
         <article className="cv-health-card">
           <b>DECISION - IMPACT</b>
@@ -1554,7 +1554,7 @@ function LoadingCompliance() {
   }
   return (
     <>
-      <Header title="Loading Compliance" description="Model A continues after QR validation: package tracks crossing the vehicle ROI estimate load utilization and block departure when the dock state is unsafe." action={<Button onClick={run} busy={busy}>Run Compliance Check</Button>} />
+      <Header title="Loading Compliance" description="Snapshot inspection counts packages inside the vehicle ROI once when the local operator presses S. The result stays frozen until Reset or another Start." action={<Button onClick={run} busy={busy}>Run Compliance Check</Button>} />
       <LiveCVWorkspace mode="LOADING_COMPLIANCE" scenario="LOADING_COMPLIANCE" title="Loading Compliance Live Camera" />
       <VisionStageFlow active={3} />
       <Panel title="Dock ROI Controls" icon={Truck}>
@@ -1595,7 +1595,7 @@ function HubVision() {
   const zones = result?.zones || [];
   return (
     <>
-      <Header title="Hub Vision" description="Model B uses the package detector plus ByteTrack memory. Fixed hub zones convert anonymous package detections into queue length, dwell time, congestion state, and overflow forecasts." action={<Button onClick={run} busy={busy}>Run Hub Vision</Button>} />
+      <Header title="Hub Vision" description="A marked package moves through Receiving, Processing, and Dispatch. Start begins timing, Stop freezes actual total time, and projected delay uses configured stage baselines." action={<Button onClick={run} busy={busy}>Run Hub Vision</Button>} />
       <LiveCVWorkspace mode="HUB_VISION" scenario="HUB_CONGESTION" title="Hub Vision Live Camera" />
       <VisionStageFlow active={5} />
       <Panel title="Hub Scenario" icon={Network}>
