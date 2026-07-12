@@ -16,6 +16,13 @@ from cv_worker.tracking.centroid_tracker import CentroidTracker
 from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubState, LoadingState
 
 
+HERO_ASSIGNMENTS = {
+    "SHP-DMG-001": {"package_id": "PKG-DMG-001", "planned_vehicle_id": "VAN-021", "planned_route_id": "RTE-JKT-BKS-01", "module": "PACKAGE_QUALITY"},
+    "SHP-LOAD-001": {"package_id": "PKG-LOAD-001", "planned_vehicle_id": "VAN-021", "planned_route_id": "RTE-JKT-BKS-01", "module": "DISPATCH_VALIDATION"},
+    "SHP-LOAD-002": {"package_id": "PKG-LOAD-002", "planned_vehicle_id": "VAN-044", "planned_route_id": "RTE-JKT-TNG-01", "module": "LOADING_COMPLIANCE"},
+    "SHP-HUB-001": {"package_id": "PKG-HUB-001", "planned_vehicle_id": "VAN-021", "planned_route_id": "RTE-JKT-BKS-01", "module": "HUB_VISION"},
+}
+
 CONTEXTS = {
     "CORRECT": {
         "loading_context_id": "CTX-JKT-BAY-01",
@@ -73,13 +80,46 @@ class CVRuntime:
             pass
         return fallback
 
+    def _configured_tracking_provider(self) -> str:
+        if self.mode == "LOADING_COMPLIANCE":
+            return config.loading_tracking_provider
+        if self.mode == "HUB_VISION":
+            return config.hub_tracking_provider
+        return "auto"
+
     def _tracking_observations(self, markers: list[dict], detections: list[dict]) -> tuple[str, list[dict]]:
+        configured = self._configured_tracking_provider()
+        if configured in {"aruco", "marker", "markers"}:
+            if markers:
+                return "ARUCO_IDENTITY", markers
+            return "ARUCO_WAITING_FOR_MARKER", []
+        if configured == "yolo_centroid":
+            yolo_tracks = self.yolo_tracker.update(detections)
+            return ("YOLO_CENTROID_FALLBACK", yolo_tracks) if yolo_tracks else ("NO_TRACKS", [])
+        if configured == "bytetrack":
+            return "BYTETRACK_UNAVAILABLE_FALLING_BACK", []
         if markers:
             return "ARUCO_IDENTITY", markers
         yolo_tracks = self.yolo_tracker.update(detections)
         if yolo_tracks:
-            return "YOLO_CENTROID", yolo_tracks
+            return "YOLO_CENTROID_FALLBACK", yolo_tracks
         return "NO_TRACKS", []
+
+    def reset_active_module(self) -> None:
+        if self.mode == "LOADING_COMPLIANCE":
+            self.loading_state.reset()
+            self.yolo_tracker = CentroidTracker()
+            self._last_loading_count = None
+        elif self.mode == "HUB_VISION":
+            self.hub_state.reset()
+            self.yolo_tracker = CentroidTracker()
+            self._last_hub_level = None
+        elif self.mode == "DISPATCH_VALIDATION":
+            self._last_qr_emit.clear()
+        self.last_event = None
+        self.last_backend_result = None
+        self.last_emit_error = None
+        self.latest_analysis.update({"tracking_observations": [], "tracking_provider": "NONE", "loading": {}, "hub": {}})
 
     def set_backend_url(self, backend_url: str) -> None:
         self.event_client.stop()
@@ -89,6 +129,8 @@ class CVRuntime:
         if name in CONTEXTS:
             self.active_context_name = name
             self.active_context = CONTEXTS[name]
+            # Changing context is a new validation decision, so allow immediate rescan.
+            self._last_qr_emit.clear()
 
     def analyze_frame(self, frame) -> None:
         started = time.perf_counter()
@@ -148,15 +190,21 @@ class CVRuntime:
         if now - self._last_qr_emit.get(key, 0) < 3:
             return
         self._last_qr_emit[key] = now
-        expected_vehicle = "VAN-021" if shipment_id == "SHP-LOAD-001" else self.active_context.get("current_vehicle_id")
+        assignment = HERO_ASSIGNMENTS.get(shipment_id, {})
+        expected_vehicle = assignment.get("planned_vehicle_id")
+        expected_route = assignment.get("planned_route_id")
         observed = self.active_context["current_vehicle_id"]
-        valid = observed == expected_vehicle
+        active_route = self.active_context["current_route_id"]
+        valid = bool(expected_vehicle) and observed == expected_vehicle and (not expected_route or active_route == expected_route)
         event_type = "PACKAGE_LOADING_VALIDATED" if valid else "PACKAGE_LOADING_MISMATCH"
-        self.emit_material_event(event_type, shipment_id=shipment_id, package_id=package_id, vehicle_id=observed, payload={
+        self.emit_material_event(event_type, shipment_id=shipment_id, package_id=package_id or assignment.get("package_id"), vehicle_id=observed, payload={
             "qr_payload": payload,
             "loading_context": self.active_context,
             "expected_vehicle_id": expected_vehicle,
+            "expected_route_id": expected_route,
             "observed_vehicle_id": observed,
+            "active_route_id": active_route,
+            "recommended_dispatch_qr": "SHP-LOAD-001",
             "validation_result": "VALID" if valid else "WRONG_VEHICLE",
             "dispatch_state": "DISPATCH_READY" if valid else "DISPATCH_BLOCKED",
         }, severity="INFO" if valid else "CRITICAL", confidence=0.96)
@@ -258,6 +306,8 @@ class CVRuntime:
             "package_provider": assets["package"]["provider"],
             "damage_provider": assets["damage"]["provider"],
             "qr_status": "READY",
+            "configured_loading_tracking": config.loading_tracking_provider.upper(),
+            "configured_hub_tracking": config.hub_tracking_provider.upper(),
             "tracker_status": self.latest_analysis.get("tracking_provider") or ("ARUCO_AVAILABLE" if self.marker_reader.enabled else "ARUCO_UNAVAILABLE"),
             "backend_connected": self.backend_enabled and self.event_client.delivery_status != "FAILED",
             "backend_enabled": self.backend_enabled,

@@ -68,19 +68,21 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
         return [
             f"QR: {'DETECTED' if qr else 'waiting'}",
             f"Shipment: {payload.get('shipment_id', '-')}",
-            f"Context: {status.get('active_context')} {status.get('active_loading_context', {}).get('current_vehicle_id')}",
-            "F1 correct / F2 wrong",
+            f"Shipment: {payload.get('shipment_id', '-')}",
+            f"Vehicle: expected {((status.get('last_event') or {}).get('payload') or {}).get('expected_vehicle_id', 'VAN-021')} / active {status.get('active_loading_context', {}).get('current_vehicle_id')}",
+            f"Route: active {status.get('active_loading_context', {}).get('current_route_id')}",
+            "Use SHP-LOAD-001 for dispatch demo",
         ]
     if mode == "LOADING_COMPLIANCE":
         return [
-            f"Tracking: {status.get('tracker_status')}",
+            f"Configured: {status.get('configured_loading_tracking')} / Active: {status.get('tracker_status')}",
             f"Visible: {loading.get('visible_packages', len(observations))} / Stable: {loading.get('stable_tracks', 0)}",
             f"Loaded: {loading.get('loaded_packages', 0)}/{loading.get('visual_capacity', 5)}",
             f"Dispatch: {loading.get('status', 'READY')}",
             f"Crossings: {loading.get('entry_crossings', 0)} in / {loading.get('exit_crossings', 0)} out",
         ]
     return [
-        f"Tracking: {status.get('tracker_status')}",
+        f"Configured: {status.get('configured_hub_tracking')} / Active: {status.get('tracker_status')}",
         f"Queue: {hub.get('queue_length', 0)} / Main: {hub.get('main_pressure_zone', '-')}",
         f"Dwell: {hub.get('average_dwell_min', 0)} sim min",
         f"Congestion: {hub.get('congestion_level', 'LOW')}",
@@ -197,7 +199,7 @@ def _annotate(cv2, frame):
     cv2.circle(canvas, (626, 648), 7, delivered_dot, -1)
     footer = f"FPS {status['camera_fps']:.1f} | Latency {status['latency_ms']:.0f} ms | Event {status['delivery_status']} | Queue {status['pending_events']} | Backend {'ON' if status['backend_enabled'] else 'OFF'}"
     _text(cv2, canvas, footer, 36, 654, .62, (226, 232, 240), 1)
-    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [A Analyze] [E Emit] [F1/F2 Context] [B Backend] [Q Quit]", 36, 688, .56, (226, 232, 240), 1)
+    _text(cv2, canvas, "[1 Quality] [2 Dispatch] [3 Loading] [4 Hub] [A Analyze] [E Emit] [R Reset] [F1/F2 Context] [B Backend] [Q Quit]", 36, 688, .56, (226, 232, 240), 1)
     return canvas
 
 
@@ -228,8 +230,7 @@ def run_desktop(camera_index: int = 0, source_video: str | None = None) -> None:
             elif key == ord("p"):
                 runtime.camera.stop()
             elif key == ord("r"):
-                runtime.last_backend_result = None
-                runtime.last_event = None
+                runtime.reset_active_module()
             elif key == ord("b"):
                 runtime.backend_enabled = not runtime.backend_enabled
             elif key == ord("a"):

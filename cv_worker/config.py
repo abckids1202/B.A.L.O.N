@@ -39,6 +39,8 @@ class WorkerConfig:
     damage_provider: str = os.getenv("CV_DAMAGE_PROVIDER", "pytorch_classifier")
     damage_model_path: str = os.getenv("CV_DAMAGE_MODEL_PATH", "models/cv/damage_detector/v1/damage_detector.pth")
     tracker: str = os.getenv("CV_TRACKER", "marker_identity")
+    loading_tracking_provider: str = os.getenv("CV_LOADING_TRACKING_PROVIDER", "aruco").lower()
+    hub_tracking_provider: str = os.getenv("CV_HUB_TRACKING_PROVIDER", "aruco").lower()
     event_snapshot_enabled: bool = _bool("CV_EVENT_SNAPSHOT_ENABLED", True)
     backend_event_enabled: bool = _bool("CV_BACKEND_EVENT_ENABLED", True)
     demo_time_multiplier: float = float(os.getenv("CV_DEMO_TIME_MULTIPLIER", "60"))

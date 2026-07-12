@@ -65,6 +65,14 @@ class LoadingState:
         self.exit_crossings = 0
         self.last_state_change = None
 
+    def reset(self) -> None:
+        self.tracks.clear()
+        self.loaded.clear()
+        self.last_status = "READY"
+        self.entry_crossings = 0
+        self.exit_crossings = 0
+        self.last_state_change = None
+
     def update(self, observations: list[dict], frame_width: int, frame_height: int, provider: str) -> dict:
         if frame_width <= 0 or frame_height <= 0:
             return self.summary(provider, [])
@@ -146,6 +154,11 @@ class HubState:
         self.time_multiplier = time_multiplier
         self.config = config or DEFAULT_HUB_ZONES
         self.tracks: dict[str, dict] = {}
+        self.last_level = "LOW"
+        self.last_pressure_zone = None
+
+    def reset(self) -> None:
+        self.tracks.clear()
         self.last_level = "LOW"
         self.last_pressure_zone = None
 

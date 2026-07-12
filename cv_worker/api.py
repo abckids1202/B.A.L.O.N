@@ -37,7 +37,7 @@ def stop():
 
 @app.post("/control/reset")
 def reset():
-    runtime.mode = "IDLE"
+    runtime.reset_active_module()
     return runtime.status()
 
 
