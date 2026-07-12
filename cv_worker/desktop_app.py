@@ -31,6 +31,11 @@ def _panel(cv2, img, x1, y1, x2, y2, title):
 
 
 def _backend_decision(status: dict) -> tuple[str, str, str]:
+    last = status.get("last_event") or {}
+    if last.get("module") and last.get("module") != status.get("active_mode"):
+        return "No material event for this mode yet", "Move/scan in this mode, then emit or wait for an auto event", "N/A"
+    if status.get("last_emit_error"):
+        return "Not ready", status.get("last_emit_error"), "N/A"
     result = status.get("last_backend_result") or {}
     effect = result.get("operational_effect") or {}
     signal = effect.get("signal") or {}
@@ -46,6 +51,7 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
     detections = analysis.get("detections") or []
     qr = analysis.get("qr") or {}
     markers = analysis.get("markers") or []
+    observations = analysis.get("tracking_observations") or []
     loading = analysis.get("loading") or {}
     hub = analysis.get("hub") or {}
     damage = analysis.get("damage") or {}
@@ -68,25 +74,66 @@ def _detection_lines(mode: str, status: dict) -> list[str]:
     if mode == "LOADING_COMPLIANCE":
         return [
             f"Tracking: {status.get('tracker_status')}",
-            f"Markers: {len(markers)}",
+            f"Visible: {loading.get('visible_packages', len(observations))} / Stable: {loading.get('stable_tracks', 0)}",
             f"Loaded: {loading.get('loaded_packages', 0)}/{loading.get('visual_capacity', 5)}",
             f"Dispatch: {loading.get('status', 'READY')}",
+            f"Crossings: {loading.get('entry_crossings', 0)} in / {loading.get('exit_crossings', 0)} out",
         ]
     return [
         f"Tracking: {status.get('tracker_status')}",
-        f"Queue: {hub.get('queue_length', 0)}",
+        f"Queue: {hub.get('queue_length', 0)} / Main: {hub.get('main_pressure_zone', '-')}",
         f"Dwell: {hub.get('average_dwell_min', 0)} sim min",
         f"Congestion: {hub.get('congestion_level', 'LOW')}",
+        f"Transitions: {len(hub.get('transitions', []))}",
     ]
 
 
+
+def _pt(point, w, h):
+    x, y = point
+    return int(x * w if 0 <= x <= 1 else x), int(y * h if 0 <= y <= 1 else y)
+
+
+def _draw_poly(cv2, frame, points, color, label=None):
+    import numpy as np
+    h, w = frame.shape[:2]
+    pts = np.array([_pt(p, w, h) for p in points], dtype=np.int32)
+    cv2.polylines(frame, [pts], True, color, 2)
+    if label:
+        x, y = pts[0]
+        _text(cv2, frame, label, int(x) + 4, int(y) + 18, .5, color, 2)
+
+
+def _draw_operational_guides(cv2, frame, status):
+    mode = status.get("active_mode")
+    analysis = status.get("latest_analysis") or {}
+    if mode == "LOADING_COMPLIANCE":
+        roi = (analysis.get("loading") or {}).get("roi") or {}
+        if roi.get("roi_polygon"):
+            _draw_poly(cv2, frame, roi["roi_polygon"], (14, 165, 233), "LOADING ROI")
+        if roi.get("entry_line"):
+            h, w = frame.shape[:2]
+            p1, p2 = [_pt(p, w, h) for p in roi["entry_line"]]
+            cv2.line(frame, p1, p2, (34, 197, 94), 3)
+            _text(cv2, frame, "ENTRY", p1[0] + 4, p1[1] + 24, .55, (34, 197, 94), 2)
+        if roi.get("exit_line"):
+            h, w = frame.shape[:2]
+            p1, p2 = [_pt(p, w, h) for p in roi["exit_line"]]
+            cv2.line(frame, p1, p2, (239, 68, 68), 2)
+            _text(cv2, frame, "EXIT", p1[0] + 4, p1[1] + 24, .55, (239, 68, 68), 2)
+    if mode == "HUB_VISION":
+        for zone in (analysis.get("hub") or {}).get("zones") or []:
+            _draw_poly(cv2, frame, zone.get("polygon") or [], (245, 158, 11), zone.get("zone_id"))
+    return frame
+
 def _draw_analysis(cv2, frame, status):
     analysis = status.get("latest_analysis") or {}
+    frame = _draw_operational_guides(cv2, frame, status)
     for item in analysis.get("detections") or []:
         x1, y1, x2, y2 = [int(v) for v in item["bbox"]]
         cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
         _text(cv2, frame, f"{item['raw_class']} {item['confidence']:.0%}", x1, max(20, y1 - 8), .55, (34, 197, 94), 2)
-    for marker in analysis.get("markers") or []:
+    for marker in analysis.get("tracking_observations") or []:
         x1, y1, x2, y2 = [int(v) for v in marker["bbox"]]
         cv2.rectangle(frame, (x1, y1), (x2, y2), (59, 130, 246), 2)
         _text(cv2, frame, marker["track_id"], x1, max(20, y1 - 8), .55, (59, 130, 246), 2)

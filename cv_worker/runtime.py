@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 
 from cv_worker.camera_manager import CameraManager
@@ -10,7 +12,8 @@ from cv_worker.detectors.package_yolo import detect_packages
 from cv_worker.detectors.qr_reader import QRReader
 from cv_worker.model_registry import damage_model, package_model, registry
 from cv_worker.services.event_client import EventClient
-from cv_worker.tracking.marker_logic import HubState, LoadingState
+from cv_worker.tracking.centroid_tracker import CentroidTracker
+from cv_worker.tracking.marker_logic import DEFAULT_HUB_ZONES, DEFAULT_LOADING_CONFIG, HubState, LoadingState
 
 
 CONTEXTS = {
@@ -48,15 +51,35 @@ class CVRuntime:
         self.event_client = EventClient(config.backend_url)
         self.qr_reader = QRReader()
         self.marker_reader = MarkerReader()
-        self.loading_state = LoadingState(limit=5)
-        self.hub_state = HubState(time_multiplier=config.demo_time_multiplier)
+        self.loading_state = LoadingState(limit=5, config=self._load_json_config("config/cv/loading_roi.json", DEFAULT_LOADING_CONFIG))
+        self.hub_state = HubState(time_multiplier=config.demo_time_multiplier, config=self._load_json_config("config/cv/hub_zones.json", DEFAULT_HUB_ZONES))
+        self.yolo_tracker = CentroidTracker()
         self.active_context_name = "WRONG"
         self.active_context = CONTEXTS[self.active_context_name]
-        self.latest_analysis: dict = {"detections": [], "qr": None, "markers": [], "loading": {}, "hub": {}, "damage": None}
+        self.latest_analysis: dict = {"detections": [], "qr": None, "markers": [], "tracking_observations": [], "tracking_provider": "NONE", "loading": {}, "hub": {}, "damage": None}
         self._last_inference_at = 0.0
         self._last_qr_emit: dict[str, float] = {}
         self._last_loading_count: int | None = None
         self._last_hub_level: str | None = None
+        self.last_emit_error: str | None = None
+
+
+    def _load_json_config(self, rel_path: str, fallback: dict) -> dict:
+        path = Path(__file__).resolve().parents[1] / rel_path
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return fallback
+
+    def _tracking_observations(self, markers: list[dict], detections: list[dict]) -> tuple[str, list[dict]]:
+        if markers:
+            return "ARUCO_IDENTITY", markers
+        yolo_tracks = self.yolo_tracker.update(detections)
+        if yolo_tracks:
+            return "YOLO_CENTROID", yolo_tracks
+        return "NO_TRACKS", []
 
     def set_backend_url(self, backend_url: str) -> None:
         self.event_client.stop()
@@ -82,9 +105,10 @@ class CVRuntime:
         qr = self.qr_reader.scan(frame)
         markers = self.marker_reader.scan(frame)
         height, width = frame.shape[:2]
-        loading = self.loading_state.update(markers, width)
-        hub = self.hub_state.update(markers, width, height)
-        self.latest_analysis = {"detections": detections, "qr": qr, "markers": markers, "loading": loading, "hub": hub, "damage": self.latest_analysis.get("damage")}
+        tracking_provider, observations = self._tracking_observations(markers, detections)
+        loading = self.loading_state.update(observations, width, height, tracking_provider)
+        hub = self.hub_state.update(observations, width, height, tracking_provider)
+        self.latest_analysis = {"detections": detections, "qr": qr, "markers": markers, "tracking_observations": observations, "tracking_provider": tracking_provider, "loading": loading, "hub": hub, "damage": self.latest_analysis.get("damage")}
         if not run_model:
             self.inference_latency_ms = (time.perf_counter() - started) * 1000
         if self.mode == "DISPATCH_VALIDATION" and qr:
@@ -139,6 +163,9 @@ class CVRuntime:
 
     def _maybe_emit_loading(self, loading: dict) -> None:
         count = int(loading.get("loaded_packages", 0))
+        if self._last_loading_count is None:
+            self._last_loading_count = count
+            return
         if self._last_loading_count == count:
             return
         self._last_loading_count = count
@@ -153,6 +180,11 @@ class CVRuntime:
 
     def emit_material_event(self, event_type: str | None = None, **overrides) -> dict:
         event = self._event_for_mode(event_type, **overrides)
+        if event.get("event_type") == "CANNOT_EMIT":
+            self.last_emit_error = event.get("payload", {}).get("reason", "Cannot emit yet")
+            self.last_backend_result = {"accepted": False, "delivery_status": "NOT_READY", "error": self.last_emit_error}
+            return self.last_backend_result
+        self.last_emit_error = None
         self.last_event = event
         if not self.backend_enabled:
             self.last_backend_result = {"accepted": False, "delivery_status": "DISABLED", "backend_disabled": True}
@@ -184,6 +216,8 @@ class CVRuntime:
                 "detections": detections[:5],
                 "qr": qr_payload,
                 "markers": self.latest_analysis.get("markers", [])[:10],
+                "tracking_observations": self.latest_analysis.get("tracking_observations", [])[:10],
+                "tracking_provider": self.latest_analysis.get("tracking_provider"),
                 "active_context": self.active_context,
             },
         }
@@ -191,6 +225,12 @@ class CVRuntime:
         base.update({k: v for k, v in overrides.items() if k in {"shipment_id", "package_id", "vehicle_id", "hub_id"}})
         if event_type:
             return {**base, "event_type": event_type}
+        if mode == "DISPATCH_VALIDATION" and not qr_payload.get("shipment_id"):
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: scan a QR first."}}
+        if mode == "LOADING_COMPLIANCE" and not (self.latest_analysis.get("loading") or {}).get("last_state_change"):
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: no loading-state change yet."}}
+        if mode == "HUB_VISION" and not (self.latest_analysis.get("hub") or {}).get("changed"):
+            return {**base, "event_type": "CANNOT_EMIT", "payload": {**base["payload"], "reason": "Cannot emit: no material hub change yet."}}
         if mode == "PACKAGE_QUALITY":
             shipment_id = qr_payload.get("shipment_id") or "SHP-DMG-001"
             package_id = qr_payload.get("package_id") or "PKG-DMG-001"
@@ -218,7 +258,7 @@ class CVRuntime:
             "package_provider": assets["package"]["provider"],
             "damage_provider": assets["damage"]["provider"],
             "qr_status": "READY",
-            "tracker_status": "MARKER_IDENTITY" if self.marker_reader.enabled else "ARUCO_UNAVAILABLE",
+            "tracker_status": self.latest_analysis.get("tracking_provider") or ("ARUCO_AVAILABLE" if self.marker_reader.enabled else "ARUCO_UNAVAILABLE"),
             "backend_connected": self.backend_enabled and self.event_client.delivery_status != "FAILED",
             "backend_enabled": self.backend_enabled,
             "delivery_status": self.event_client.delivery_status,
@@ -237,7 +277,8 @@ class CVRuntime:
             "frame_size": {"width": self.camera.frame_width, "height": self.camera.frame_height},
             "latest_analysis": self.latest_analysis,
             "assets": assets,
-            "worker_version": "local-cv-desktop-v3",
+            "last_emit_error": self.last_emit_error,
+            "worker_version": "local-cv-desktop-v4",
             "note": "Local webcam owns live CV. Web frontend reads status/events and does not need webcam ownership.",
         }
 
