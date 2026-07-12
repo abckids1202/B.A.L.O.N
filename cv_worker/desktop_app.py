@@ -181,9 +181,13 @@ def _draw_analysis(cv2, frame, status):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
         _text(cv2, frame, f"{item.get('raw_class', 'PACKAGE')} {item.get('confidence', 0):.0%}", x1, max(20, y1 - 8), .55, (34, 197, 94), 2)
     for marker in analysis.get("tracking_observations") or []:
-        x1, y1, x2, y2 = [int(v) for v in marker["bbox"]]
+        bbox = marker.get("bbox")
+        if not bbox:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(frame, (x1, y1), (x2, y2), (59, 130, 246), 2)
-        _text(cv2, frame, marker["track_id"], x1, max(20, y1 - 8), .55, (59, 130, 246), 2)
+        label = marker.get("track_id") or marker.get("identity") or marker.get("label") or marker.get("source") or "TRACK"
+        _text(cv2, frame, label, x1, max(20, y1 - 8), .55, (59, 130, 246), 2)
     qr = analysis.get("qr")
     if qr and qr.get("points"):
         pts = qr["points"][0] if len(qr["points"]) == 1 else qr["points"]
