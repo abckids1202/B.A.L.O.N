@@ -409,7 +409,7 @@ def process_package_damage_signal(shipment_id: str, filename: str = "demo-damage
     try:
         risk = predict_risk(shipment_id)
     except Exception as exc:
-        risk = {"shipment_id": shipment_id, "fallback": True, "risk_score": confidence, "error": str(exc)}
+        risk = {"shipment_id": shipment_id, "fallback": True, "risk_score": damage_probability, "error": str(exc)}
     intervention = _create_signal_intervention(
         signal,
         "PACKAGE_INSPECTION",

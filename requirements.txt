@@ -9,5 +9,7 @@ scikit-learn
 joblib
 ortools
 Pillow
+opencv-python-headless
+ultralytics
 pytest
 httpx

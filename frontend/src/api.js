@@ -16,6 +16,25 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+async function upload(path, formData, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 45000);
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`${response.status} ${response.statusText}: ${text}`);
+    }
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export const api = {
   base: API_BASE,
   health: () => request("/health"),
@@ -68,5 +87,44 @@ export const api = {
   packageQuality: (shipmentId = "SHP-1028") => request(`/api/visual-intelligence/package-quality?shipment_id=${shipmentId}`, { method: "POST" }),
   dispatchValidation: (shipmentId = "SHP-1028", observedVehicleId = "VAN-044") => request(`/api/visual-intelligence/dispatch-validation?shipment_id=${shipmentId}&observed_vehicle_id=${observedVehicleId}`, { method: "POST" }),
   loadingCompliance: (vehicleId = "TRK-001", loadedPackages = 6, visualCapacity = 5) => request(`/api/visual-intelligence/loading-compliance?vehicle_id=${vehicleId}&loaded_packages=${loadedPackages}&visual_capacity=${visualCapacity}`, { method: "POST" }),
-  hubVision: (hubId = "HUB-JKT", observedPackages) => request(`/api/visual-intelligence/hub-vision?hub_id=${hubId}${observedPackages ? `&observed_packages=${observedPackages}` : ""}`, { method: "POST" })
+  hubVision: (hubId = "HUB-JKT", observedPackages) => request(`/api/visual-intelligence/hub-vision?hub_id=${hubId}${observedPackages ? `&observed_packages=${observedPackages}` : ""}`, { method: "POST" }),
+  webCvHealth: () => request("/api/web-cv/health"),
+  webCvModelStatus: () => request("/api/web-cv/models/status"),
+  webCvCreateSession: (module, processingMode = "LIVE_CAMERA") => request("/api/web-cv/sessions", { method: "POST", body: JSON.stringify({ module, processing_mode: processingMode }) }),
+  webCvResetSession: (sessionId) => request(`/api/web-cv/sessions/${sessionId}/reset`, { method: "POST" }),
+  webCvDeleteSession: (sessionId) => request(`/api/web-cv/sessions/${sessionId}`, { method: "DELETE" }),
+  webCvPackageQuality: (sessionId, file) => {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("file", file, file.name || "package-quality.jpg");
+    return upload("/api/web-cv/package-quality/analyze", form);
+  },
+  webCvDispatchScan: (sessionId, file, contextId = "CTX-JKT-BAY-02") => {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("context_id", contextId);
+    form.append("file", file, file.name || "dispatch-qr.jpg");
+    return upload("/api/web-cv/dispatch/scan", form);
+  },
+  webCvLoadingSnapshot: (sessionId, file, vehicleId = "VAN-021") => {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("vehicle_id", vehicleId);
+    form.append("file", file, file.name || "loading-snapshot.jpg");
+    return upload("/api/web-cv/loading/snapshot", form);
+  },
+  webCvHubStart: (sessionId, file) => {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("file", file, file.name || "hub-start.jpg");
+    return upload("/api/web-cv/hub/start", form);
+  },
+  webCvHubFrame: (sessionId, file) => {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("file", file, file.name || "hub-frame.jpg");
+    return upload("/api/web-cv/hub/frame", form);
+  },
+  webCvHubStop: (sessionId) => request("/api/web-cv/hub/stop", { method: "POST", body: JSON.stringify({ session_id: sessionId }) }),
+  webCvHubReset: (sessionId) => request("/api/web-cv/hub/reset", { method: "POST", body: JSON.stringify({ session_id: sessionId }) })
 };

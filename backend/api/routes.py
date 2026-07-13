@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Body, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from database import repositories as repo
 
 from backend.schemas.api import CarbonEstimateRequest, RouteOptimizeRequest
-from backend.services import core
+from backend.services import core, web_cv
 
 
 router = APIRouter(prefix="/api")
@@ -18,6 +18,17 @@ def handle(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+async def handle_async(fn, *args, **kwargs):
+    try:
+        return await fn(*args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        code = str(exc)
+        status = 503 if code in {"CV_INFERENCE_BUSY", "INFERENCE_TIMEOUT"} else 500
+        raise HTTPException(status_code=status, detail=code)
 
 
 @router.get("/vehicles")
@@ -214,6 +225,71 @@ def cv_event(event_id: str):
 @router.post("/cv/demo-replay")
 def cv_demo_replay(scenario: str = "ALL"):
     return handle(core.replay_cv_scenario, scenario)
+
+
+@router.get("/web-cv/health")
+def web_cv_health():
+    return web_cv.health()
+
+
+@router.get("/web-cv/models/status")
+def web_cv_model_status():
+    return web_cv.model_status()
+
+
+@router.post("/web-cv/sessions")
+def web_cv_create_session(payload: dict = Body(...)):
+    return handle(web_cv.create_session, payload.get("module"), payload.get("processing_mode", "LIVE_CAMERA"))
+
+
+@router.get("/web-cv/sessions/{session_id}")
+def web_cv_get_session(session_id: str):
+    return handle(web_cv.get_session, session_id)
+
+
+@router.post("/web-cv/sessions/{session_id}/reset")
+def web_cv_reset_session(session_id: str):
+    return handle(web_cv.reset_session, session_id)
+
+
+@router.delete("/web-cv/sessions/{session_id}")
+def web_cv_delete_session(session_id: str):
+    return web_cv.delete_session(session_id)
+
+
+@router.post("/web-cv/package-quality/analyze")
+async def web_cv_package_quality(session_id: str = Form(...), file: UploadFile = File(...)):
+    return await handle_async(web_cv.analyze_package_quality, session_id, await file.read(), file.filename, file.content_type)
+
+
+@router.post("/web-cv/dispatch/scan")
+async def web_cv_dispatch_scan(session_id: str = Form(...), context_id: str = Form("CTX-JKT-BAY-02"), file: UploadFile = File(...)):
+    return await handle_async(web_cv.validate_dispatch, session_id, await file.read(), file.filename, file.content_type, context_id)
+
+
+@router.post("/web-cv/loading/snapshot")
+async def web_cv_loading_snapshot(session_id: str = Form(...), vehicle_id: str = Form("VAN-021"), file: UploadFile = File(...)):
+    return await handle_async(web_cv.analyze_loading_snapshot, session_id, await file.read(), file.filename, file.content_type, vehicle_id)
+
+
+@router.post("/web-cv/hub/start")
+async def web_cv_hub_start(session_id: str = Form(...), file: UploadFile = File(...)):
+    return await handle_async(web_cv.start_hub_journey, session_id, await file.read(), file.filename, file.content_type)
+
+
+@router.post("/web-cv/hub/frame")
+async def web_cv_hub_frame(session_id: str = Form(...), file: UploadFile = File(...)):
+    return await handle_async(web_cv.observe_hub_journey, session_id, await file.read(), file.filename, file.content_type)
+
+
+@router.post("/web-cv/hub/stop")
+def web_cv_hub_stop(payload: dict = Body(...)):
+    return handle(web_cv.stop_hub_journey, payload.get("session_id"))
+
+
+@router.post("/web-cv/hub/reset")
+def web_cv_hub_reset(payload: dict = Body(...)):
+    return handle(web_cv.hub_reset, payload.get("session_id"))
 
 
 @router.post("/risk/predict/{shipment_id}")
