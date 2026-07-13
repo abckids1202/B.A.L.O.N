@@ -37,7 +37,8 @@ MAX_IMAGE_DIMENSION = int(os.getenv("CV_MAX_IMAGE_DIMENSION", "1600"))
 CONFIDENCE_THRESHOLD = float(os.getenv("CV_CONFIDENCE_THRESHOLD", "0.75"))
 LOADING_MAX_PACKAGES = int(os.getenv("CV_LOADING_MAX_PACKAGES", "5"))
 MAX_CONCURRENT_INFERENCE = max(1, int(os.getenv("CV_WEB_MAX_CONCURRENT_INFERENCE", "1")))
-INFERENCE_TIMEOUT_SECONDS = float(os.getenv("CV_WEB_INFERENCE_TIMEOUT_SECONDS", "30"))
+INFERENCE_TIMEOUT_SECONDS = float(os.getenv("CV_WEB_INFERENCE_TIMEOUT_SECONDS", "45"))
+INFERENCE_IMAGE_SIZE = int(os.getenv("CV_WEB_INFERENCE_IMAGE_SIZE", "512"))
 SESSION_TTL_SECONDS = int(float(os.getenv("CV_WEB_SESSION_TTL_MINUTES", "30")) * 60)
 
 _inference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCE)
@@ -260,7 +261,7 @@ def _detect(frame: np.ndarray) -> dict[str, Any]:
     model = package_model()
     if model is None:
         raise ValueError("MODEL_NOT_READY: package model is not loaded")
-    return detect_packages(model, frame, CONFIDENCE_THRESHOLD)
+    return detect_packages(model, frame, CONFIDENCE_THRESHOLD, imgsz=INFERENCE_IMAGE_SIZE)
 
 
 def _normalize_detection(item: dict[str, Any], width: int, height: int) -> dict[str, Any]:
@@ -365,6 +366,64 @@ def _loading_context(context_id: str) -> dict:
     return dict(row)
 
 
+def _decode_qr_payload(raw_payload: Any) -> dict[str, Any]:
+    if isinstance(raw_payload, dict):
+        payload = dict(raw_payload)
+    elif isinstance(raw_payload, str):
+        text = raw_payload.strip()
+        try:
+            parsed = repo.jload(text, None)
+            payload = parsed if isinstance(parsed, dict) else {"shipment_id": text}
+        except Exception:
+            payload = {"shipment_id": text}
+    else:
+        payload = {}
+    if "shipment_id" not in payload and payload.get("raw"):
+        payload["shipment_id"] = str(payload["raw"])
+    if payload.get("shipment_id") and "package_id" not in payload:
+        payload["package_id"] = "PKG-" + str(payload["shipment_id"]).split("-")[-1]
+    return payload
+
+
+def _dispatch_result(state: WebCvSession, decoded_payload: dict[str, Any], context_id: str, evidence: dict | None = None, qr_meta: dict | None = None) -> dict:
+    payload = _decode_qr_payload(decoded_payload)
+    shipment_id = str(payload.get("shipment_id") or "")
+    if not shipment_id:
+        raise ValueError("MALFORMED_QR: QR payload must contain shipment_id")
+    package = _demo_package(shipment_id)
+    context = _loading_context(context_id)
+    planned_vehicle = package.get("planned_vehicle_id") or package.get("planned_vehicle")
+    planned_route = package.get("planned_route_id") or package.get("route")
+    mismatch = planned_vehicle != context["current_vehicle_id"]
+    status = "WRONG_VEHICLE" if mismatch else "VALID"
+    event_payload = {
+        "qr": {"payload": payload, **(qr_meta or {})},
+        "shipment_id": shipment_id,
+        "package_id": payload.get("package_id") or package.get("package_id"),
+        "planned_vehicle_id": planned_vehicle,
+        "planned_route_id": planned_route,
+        "active_context": context,
+        "validation_result": status,
+        "dispatch_state": "BLOCKED" if mismatch else "READY",
+    }
+    event = _event(
+        "PACKAGE_LOADING_MISMATCH" if mismatch else "PACKAGE_LOADING_VALIDATED",
+        "DISPATCH_VALIDATION",
+        event_payload,
+        shipment_id=shipment_id,
+        package_id=event_payload["package_id"],
+        vehicle_id=context["current_vehicle_id"],
+        hub_id=context["hub_id"],
+        severity="CRITICAL" if mismatch else "INFO",
+        confidence=0.94 if mismatch else 0.88,
+    )
+    observation = {"qr": event_payload["qr"], "shipment_id": shipment_id, "package_id": event_payload["package_id"]}
+    analysis = {"planned_assignment": package, "active_context": context, "comparison": status}
+    decision = {"status": status, "dispatch": "BLOCKED" if mismatch else "READY", "recommendation": "Move package to VAN-021" if mismatch else "Release package to loading"}
+    impact = {"vehicle_assignment": "mismatch_detected" if mismatch else "validated", "event_type": event["observation"]["event_type"]}
+    return _envelope(state, observation, analysis, decision, impact, evidence or {}, event)
+
+
 async def validate_dispatch(session_id: str, content: bytes, filename: str | None, content_type: str | None, context_id: str = "CTX-JKT-BAY-02") -> dict:
     initialize_database()
     state = _get_session(session_id)
@@ -373,30 +432,14 @@ async def validate_dispatch(session_id: str, content: bytes, filename: str | Non
     qr = await _run_inference(_scan_qr, frame)
     if not qr:
         raise ValueError("QR_UNREADABLE: hold SHP-LOAD-001 steady and retry")
-    payload = qr.get("payload") or {}
-    shipment_id = str(payload.get("shipment_id") or "")
-    if not shipment_id:
-        raise ValueError("MALFORMED_QR: QR payload must contain shipment_id")
-    package = _demo_package(shipment_id)
-    context = _loading_context(context_id)
-    planned_vehicle = package.get("planned_vehicle_id") or package.get("planned_vehicle")
-    mismatch = planned_vehicle != context["current_vehicle_id"]
-    status = "WRONG_VEHICLE" if mismatch else "VALID"
-    event_payload = {
-        "qr": qr,
-        "shipment_id": shipment_id,
-        "package_id": payload.get("package_id") or package.get("package_id"),
-        "planned_vehicle_id": planned_vehicle,
-        "active_context": context,
-        "validation_result": status,
-        "dispatch_state": "BLOCKED" if mismatch else "READY",
-    }
-    event = _event("PACKAGE_LOADING_MISMATCH" if mismatch else "PACKAGE_LOADING_VALIDATED", "DISPATCH_VALIDATION", event_payload, shipment_id=shipment_id, package_id=event_payload["package_id"], vehicle_id=context["current_vehicle_id"], hub_id=context["hub_id"], severity="CRITICAL" if mismatch else "INFO", confidence=0.94 if mismatch else 0.88)
-    observation = {"qr": qr, "shipment_id": shipment_id, "package_id": event_payload["package_id"]}
-    analysis = {"planned_assignment": package, "active_context": context, "comparison": status}
-    decision = {"status": status, "dispatch": "BLOCKED" if mismatch else "READY", "recommendation": "Move package to VAN-021" if mismatch else "Release package to loading"}
-    impact = {"vehicle_assignment": "mismatch_detected" if mismatch else "validated", "event_type": event["observation"]["event_type"]}
-    return _envelope(state, observation, analysis, decision, impact, evidence, event)
+    return _dispatch_result(state, qr.get("payload") or qr.get("raw") or {}, context_id, evidence, {"raw": qr.get("raw"), "points": qr.get("points"), "decoder": "OPENCV_FALLBACK"})
+
+
+def validate_dispatch_decoded(session_id: str, decoded_payload: dict[str, Any] | str, context_id: str = "CTX-JKT-BAY-02", qr_meta: dict | None = None) -> dict:
+    initialize_database()
+    state = _get_session(session_id)
+    state.status = "SCANNING"
+    return _dispatch_result(state, decoded_payload, context_id, {"source": "BROWSER_BARCODE_DETECTOR"}, {**(qr_meta or {}), "decoder": "BROWSER_BARCODE_DETECTOR"})
 
 
 async def analyze_loading_snapshot(session_id: str, content: bytes, filename: str | None, content_type: str | None, vehicle_id: str = "VAN-021") -> dict:
@@ -410,7 +453,14 @@ async def analyze_loading_snapshot(session_id: str, content: bytes, filename: st
     summary = loading.capture(detection_result.get("detections", []), width, height, CONFIDENCE_THRESHOLD)
     event = _event("PROTOTYPE_LOAD_LIMIT_EXCEEDED" if summary["excess_count"] else "LOADING_COMPLIANCE_VALIDATED", "LOADING_COMPLIANCE", summary, vehicle_id=vehicle_id, hub_id="HUB-JKT", severity="CRITICAL" if summary["excess_count"] else "INFO", confidence=0.9)
     observation = {"packages": [_normalize_detection(item, width, height) for item in detection_result.get("detections", [])], "roi": summary["roi"]}
-    analysis = {**summary, "valid_detections": [_normalize_detection(item, width, height) for item in summary["valid_detections"]], "package_detection_ms": detection_result.get("processing_time_ms")}
+    analysis = {
+        **summary,
+        "roi_polygon": summary["roi"]["roi_polygon"],
+        "raw_detections": [_normalize_detection(item, width, height) for item in detection_result.get("detections", [])],
+        "valid_detections": [_normalize_detection(item, width, height) for item in summary["valid_detections"]],
+        "deduped_detections": [_normalize_detection(item, width, height) for item in summary["valid_detections"]],
+        "package_detection_ms": detection_result.get("processing_time_ms"),
+    }
     decision = {"status": summary["capacity_status"], "dispatch": summary["dispatch_state"], "recommendation": summary["recommendation"]}
     impact = {"vehicle_digital_twin": "load_state_updated", "event_type": event["observation"]["event_type"]}
     return _envelope(state, observation, analysis, decision, impact, evidence, event)

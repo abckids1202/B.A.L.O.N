@@ -267,6 +267,17 @@ async def web_cv_dispatch_scan(session_id: str = Form(...), context_id: str = Fo
     return await handle_async(web_cv.validate_dispatch, session_id, await file.read(), file.filename, file.content_type, context_id)
 
 
+@router.post("/web-cv/dispatch/validate-decoded")
+def web_cv_dispatch_validate_decoded(payload: dict = Body(...)):
+    return handle(
+        web_cv.validate_dispatch_decoded,
+        payload.get("session_id"),
+        payload.get("qr_payload") or payload.get("raw_value") or {},
+        payload.get("context_id", "CTX-JKT-BAY-02"),
+        payload.get("qr_meta") or {},
+    )
+
+
 @router.post("/web-cv/loading/snapshot")
 async def web_cv_loading_snapshot(session_id: str = Form(...), vehicle_id: str = Form("VAN-021"), file: UploadFile = File(...)):
     return await handle_async(web_cv.analyze_loading_snapshot, session_id, await file.read(), file.filename, file.content_type, vehicle_id)

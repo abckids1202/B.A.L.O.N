@@ -106,6 +106,7 @@ export const api = {
     form.append("file", file, file.name || "dispatch-qr.jpg");
     return upload("/api/web-cv/dispatch/scan", form);
   },
+  webCvDispatchValidateDecoded: (sessionId, qrPayload, contextId = "CTX-JKT-BAY-02", qrMeta = {}) => request("/api/web-cv/dispatch/validate-decoded", { method: "POST", body: JSON.stringify({ session_id: sessionId, qr_payload: qrPayload, context_id: contextId, qr_meta: qrMeta }) }),
   webCvLoadingSnapshot: (sessionId, file, vehicleId = "VAN-021") => {
     const form = new FormData();
     form.append("session_id", sessionId);

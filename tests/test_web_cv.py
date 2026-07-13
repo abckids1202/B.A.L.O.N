@@ -30,6 +30,10 @@ def fake_detect(frame):
     }
 
 
+def fake_detect_empty(frame):
+    return {"processing_time_ms": 2.1, "detections": []}
+
+
 def client():
     seed()
     seed_cv_demo_data.main()
@@ -60,6 +64,17 @@ def test_web_cv_package_quality_endpoint(monkeypatch):
     payload = response.json()
     assert payload["decision"]["status"] == "INSPECTION_REQUIRED"
     assert payload["event"]["observation"]["event_type"] == "PACKAGE_DAMAGE_DETECTED"
+    assert payload["observation"]["selected_package"]["bbox"]["x1"] == 0.1
+
+
+def test_web_cv_package_quality_no_package(monkeypatch):
+    patch_cv(monkeypatch)
+    monkeypatch.setattr(web_cv, "_detect", fake_detect_empty)
+    api = client()
+    session = api.post("/api/web-cv/sessions", json={"module": "PACKAGE_QUALITY"}).json()
+    response = api.post("/api/web-cv/package-quality/analyze", data={"session_id": session["session_id"]}, files={"file": ("box.jpg", b"fake", "image/jpeg")})
+    assert response.status_code == 400
+    assert "NO_PACKAGE_DETECTED" in response.text
 
 
 def test_web_cv_dispatch_wrong_and_correct_context(monkeypatch):
@@ -73,6 +88,25 @@ def test_web_cv_dispatch_wrong_and_correct_context(monkeypatch):
     assert correct["decision"]["status"] == "VALID"
 
 
+def test_web_cv_dispatch_validate_decoded_qr(monkeypatch):
+    patch_cv(monkeypatch)
+    api = client()
+    session = api.post("/api/web-cv/sessions", json={"module": "DISPATCH_VALIDATION"}).json()
+    wrong = api.post("/api/web-cv/dispatch/validate-decoded", json={
+        "session_id": session["session_id"],
+        "context_id": "CTX-JKT-BAY-02",
+        "qr_payload": {"shipment_id": "SHP-LOAD-001", "package_id": "PKG-LOAD-001"},
+        "qr_meta": {"bbox": {"x1": 0.2, "y1": 0.2, "x2": 0.5, "y2": 0.5}},
+    }).json()
+    assert wrong["decision"]["status"] == "WRONG_VEHICLE"
+    correct = api.post("/api/web-cv/dispatch/validate-decoded", json={
+        "session_id": session["session_id"],
+        "context_id": "CTX-JKT-BAY-01",
+        "qr_payload": {"shipment_id": "SHP-LOAD-001", "package_id": "PKG-LOAD-001"},
+    }).json()
+    assert correct["decision"]["status"] == "VALID"
+
+
 def test_web_cv_loading_snapshot_counts_once(monkeypatch):
     patch_cv(monkeypatch)
     api = client()
@@ -80,6 +114,8 @@ def test_web_cv_loading_snapshot_counts_once(monkeypatch):
     response = api.post("/api/web-cv/loading/snapshot", data={"session_id": session["session_id"], "vehicle_id": "VAN-021"}, files={"file": ("load.jpg", b"fake", "image/jpeg")}).json()
     assert response["analysis"]["detected_package_count"] == 5
     assert response["decision"]["dispatch"] == "READY"
+    assert response["analysis"]["roi_polygon"]
+    assert len(response["analysis"]["raw_detections"]) == 6
 
 
 def test_web_cv_hub_journey_start_and_stop(monkeypatch):

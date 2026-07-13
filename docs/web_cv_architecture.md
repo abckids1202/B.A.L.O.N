@@ -11,19 +11,19 @@ python -m cv_worker.main --camera-index 0
 Web Assessor Mode runs from the deployed React app:
 
 ```text
-Vercel React camera/upload
+Vercel React live browser camera
 -> Render FastAPI /api/web-cv
 -> shared model adapters and CV state machines
 -> existing /api/cv/events ingestion
 -> SSE updates on the Visual Intelligence pages
 ```
 
-Vercel never runs Python, OpenCV, or model inference. The browser captures deliberate JPEG snapshots and uploads them to Render. Render validates the image, runs the module logic, emits a normalized CV event, and returns Detection -> Analysis -> Decision -> Impact data.
+Vercel never runs Python, OpenCV, or model inference. The browser captures deliberate JPEG snapshots from the live camera and sends them to Render only when the assessor presses a module action. Render validates the image, runs the module logic, emits a normalized CV event, and returns Detection -> Analysis -> Decision -> Impact data.
 
 ## Pages
 
 - Package Quality: package YOLO plus damage classifier.
-- Dispatch Validation: browser image upload/camera frame plus OpenCV QR decode and backend assignment validation.
+- Dispatch Validation: browser camera frame plus browser QR decoding when available, with backend OpenCV QR fallback and authoritative assignment validation.
 - Loading Compliance: one frozen snapshot, ROI filtering, overlap dedupe, and capacity decision.
 - Hub Vision: one-package journey timing across Receiving, Processing, and Dispatch.
 

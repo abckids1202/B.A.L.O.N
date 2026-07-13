@@ -6,11 +6,14 @@ from typing import Any
 import numpy as np
 
 
-def detect_packages(model: Any, frame: np.ndarray, confidence: float = 0.25) -> dict:
+def detect_packages(model: Any, frame: np.ndarray, confidence: float = 0.25, imgsz: int | None = None) -> dict:
     if model is None:
         return {"detections": [], "processing_time_ms": 0.0, "error": "package model unavailable"}
     started = time.perf_counter()
-    results = model.predict(frame, conf=confidence, verbose=False)
+    predict_kwargs = {"conf": confidence, "verbose": False}
+    if imgsz:
+        predict_kwargs["imgsz"] = imgsz
+    results = model.predict(frame, **predict_kwargs)
     detections = []
     for result in results:
         names = getattr(result, "names", {}) or getattr(model, "names", {}) or {}

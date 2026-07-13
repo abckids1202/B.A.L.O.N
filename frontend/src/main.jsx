@@ -1404,7 +1404,6 @@ function LiveCVWorkspace({ mode, scenario, title }) {
         </article>
       </div>
       <div className="control-row cv-control-row">
-        <Button onClick={replay} busy={busy}>Run Replay</Button>
         <a className="button secondary" href="http://127.0.0.1:8765/docs" target="_blank" rel="noreferrer">Worker API</a>
         <a className="button secondary" href="http://127.0.0.1:8765/stream" target="_blank" rel="noreferrer">Optional Local Stream</a>
       </div>
@@ -1420,15 +1419,14 @@ function LiveCVWorkspace({ mode, scenario, title }) {
   );
 }
 
-function useWebCvSession(module, initialMode = "LIVE_CAMERA") {
+function useWebCvSession(module) {
   const [session, setSession] = useState(null);
   const [health, setHealth] = useState(null);
   const [error, setError] = useState("");
-  const [sourceMode, setSourceMode] = useState(initialMode);
   const normalizedModule = module === "HUB_VISION" ? "HUB_JOURNEY" : module;
   useEffect(() => {
     let active = true;
-    Promise.all([api.webCvHealth().catch((err) => ({ status: "OFFLINE", error: err.message })), api.webCvCreateSession(normalizedModule, sourceMode)])
+    Promise.all([api.webCvHealth().catch((err) => ({ status: "OFFLINE", error: err.message })), api.webCvCreateSession(normalizedModule, "LIVE_CAMERA")])
       .then(([healthData, sessionData]) => {
         if (!active) return;
         setHealth(healthData);
@@ -1437,24 +1435,45 @@ function useWebCvSession(module, initialMode = "LIVE_CAMERA") {
       })
       .catch((err) => active && setError(err.message));
     return () => { active = false; };
-  }, [normalizedModule, sourceMode]);
+  }, [normalizedModule]);
   async function reset() {
     if (!session?.session_id) return;
     const next = await api.webCvResetSession(session.session_id);
     setSession(next);
   }
-  return { session, setSession, health, error, setError, sourceMode, setSourceMode, reset };
+  return { session, setSession, health, error, setError, reset };
 }
 
-function WebCvCameraPanel({ title, module, session, sourceMode, setSourceMode, onRun, onReset, busy, result, instruction, primaryAction = "Analyze Snapshot", secondaryAction, onSecondary }) {
+const LOADING_ROI = [[0.45, 0.14], [0.96, 0.14], [0.96, 0.92], [0.45, 0.92]];
+
+function formatErrorMessage(message) {
+  const text = String(message || "");
+  if (text.includes("INFERENCE_TIMEOUT")) return "Inference timed out. Try again with one clear package, closer to camera, and better lighting.";
+  if (text.includes("NO_PACKAGE_DETECTED")) return "No package detected. Put one package fully inside the camera view and retry.";
+  if (text.includes("QR_UNREADABLE")) return "QR unreadable. Hold SHP-LOAD-001 steady, flat, and closer to the camera.";
+  return text.replace(/[{}"]/g, "") || "The vision request failed.";
+}
+
+function bboxStyle(box = {}) {
+  return {
+    left: `${(box.x1 || 0) * 100}%`,
+    top: `${(box.y1 || 0) * 100}%`,
+    width: `${Math.max(.02, (box.x2 || 0) - (box.x1 || 0)) * 100}%`,
+    height: `${Math.max(.02, (box.y2 || 0) - (box.y1 || 0)) * 100}%`
+  };
+}
+
+function polygonPoints(points = []) {
+  return points.map(([x, y]) => `${x * 100}% ${y * 100}%`).join(", ");
+}
+
+function WebCvCameraPanel({ title, module, session, health, onRun, onReset, onStop, busy, result, instruction, primaryAction = "Analyze Snapshot", stopAction, sideCards = [], logs = [], overlay = "packages", qrOverlay = null }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const fileRef = useRef(null);
   const streamRef = useRef(null);
   const [cameraState, setCameraState] = useState("STOPPED");
   const [cameraError, setCameraError] = useState("");
-  const [previewUrl, setPreviewUrl] = useState("");
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [lastLatency, setLastLatency] = useState(null);
 
   useEffect(() => () => stopCamera(), []);
 
@@ -1465,7 +1484,6 @@ function WebCvCameraPanel({ title, module, session, sourceMode, setSourceMode, o
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
       setCameraState("CAMERA_READY");
-      setSourceMode("LIVE_CAMERA");
     } catch (err) {
       setCameraError(err?.message || "Camera permission denied or unavailable.");
       setCameraState("FAILED");
@@ -1483,8 +1501,7 @@ function WebCvCameraPanel({ title, module, session, sourceMode, setSourceMode, o
     return new Promise((resolve, reject) => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (sourceMode === "UPLOAD" && selectedFile) return resolve(selectedFile);
-      if (!video || !canvas || !streamRef.current) return reject(new Error("Start the camera or upload an image first."));
+      if (!video || !canvas || !streamRef.current) return reject(new Error("Start the camera first."));
       const width = video.videoWidth || 1280;
       const height = video.videoHeight || 720;
       canvas.width = width;
@@ -1498,54 +1515,65 @@ function WebCvCameraPanel({ title, module, session, sourceMode, setSourceMode, o
   }
 
   async function run() {
-    const file = await captureBlob();
-    await onRun(file);
+    try {
+      setCameraError("");
+      const started = performance.now();
+      const file = await captureBlob();
+      await onRun(file);
+      setLastLatency(Math.round(performance.now() - started));
+    } catch (err) {
+      setCameraError(formatErrorMessage(err.message));
+    }
   }
 
-  function onUpload(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setSelectedFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
-    setSourceMode("UPLOAD");
-    stopCamera();
-  }
-
-  const overlays = result?.observation?.packages || result?.analysis?.valid_detections || [];
+  const packages = result?.analysis?.valid_detections?.length ? result.analysis.valid_detections : (result?.observation?.packages || []);
+  const selected = result?.observation?.selected_package;
+  const overlayBoxes = selected && !packages.length ? [selected] : packages;
+  const latestEvent = result?.event?.observation;
   return (
     <Panel title={title} icon={Boxes}>
+      <div className="webcv-topline">
+        <span><b>Mode</b> LIVE CAMERA</span>
+        <span><b>Backend</b> {health?.status || "CHECKING"}</span>
+        <span><b>Models</b> {health?.package_model || "N/A"} / {health?.damage_model || "N/A"}</span>
+        <span><b>Session</b> {session?.status || "STARTING"}</span>
+      </div>
       <div className="webcv-workbench">
         <div className="webcv-stage">
-          <div className="webcv-source-tabs">
-            {["LIVE_CAMERA", "UPLOAD", "REPLAY", "LOCAL_WORKER"].map((mode) => <button key={mode} className={sourceMode === mode ? "active" : ""} onClick={() => setSourceMode(mode)}>{mode.replace("_", " ")}</button>)}
-          </div>
           <div className="webcv-video">
-            {sourceMode === "UPLOAD" && previewUrl ? <img src={previewUrl} alt="Uploaded evidence" /> : <video ref={videoRef} autoPlay playsInline muted />}
+            <video ref={videoRef} autoPlay playsInline muted />
             <canvas ref={canvasRef} className="hidden-canvas" />
             <div className="webcv-overlay">
-              {overlays.map((item, index) => {
+              {overlay === "loading" && <div className="webcv-roi" style={{ clipPath: `polygon(${polygonPoints(LOADING_ROI)})` }}><span>LOADING ROI / MAX 5</span></div>}
+              {overlay === "hub" && <div className="webcv-zones">
+                {["RECEIVING", "PROCESSING", "DISPATCH"].map((zone) => <span key={zone}>{zone}</span>)}
+              </div>}
+              {qrOverlay?.bbox && <i className="qr-box" style={bboxStyle(qrOverlay.bbox)}><span>{qrOverlay.label || "QR DETECTED"}</span></i>}
+              {overlayBoxes.map((item, index) => {
                 const box = item.bbox || {};
-                return <i key={index} style={{ left: `${(box.x1 || 0) * 100}%`, top: `${(box.y1 || 0) * 100}%`, width: `${Math.max(.02, (box.x2 || 0) - (box.x1 || 0)) * 100}%`, height: `${Math.max(.02, (box.y2 || 0) - (box.y1 || 0)) * 100}%` }}><span>{item.normalized_class || item.raw_class || "PACKAGE"} {Math.round((item.confidence || 0) * 100)}%</span></i>;
+                return <i key={index} className={result?.analysis?.damage?.label === "DAMAGED" ? "danger" : ""} style={bboxStyle(box)}><span>{item.normalized_class || item.raw_class || "PACKAGE"} {Math.round((item.confidence || 0) * 100)}%</span></i>;
               })}
             </div>
-            {cameraState !== "CAMERA_READY" && sourceMode === "LIVE_CAMERA" && <div className="webcv-empty"><b>Camera stopped</b><span>{instruction}</span></div>}
+            {cameraState !== "CAMERA_READY" && <div className="webcv-empty"><b>Camera stopped</b><span>{instruction}</span></div>}
           </div>
           <div className="webcv-controls">
             <Button onClick={startCamera} secondary>Start Camera</Button>
-            <Button onClick={stopCamera} secondary>Stop Camera</Button>
-            <Button onClick={() => fileRef.current?.click()} secondary>Upload Image</Button>
             <Button onClick={run} busy={busy}>{primaryAction}</Button>
-            {secondaryAction && <Button onClick={onSecondary} busy={busy} secondary>{secondaryAction}</Button>}
+            {stopAction && <Button onClick={onStop} busy={busy} secondary>{stopAction}</Button>}
             <Button onClick={onReset} secondary>Reset</Button>
-            <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={onUpload} hidden />
           </div>
           {(cameraError || session?.error) && <div className="webcv-error">{cameraError || session.error}</div>}
+          <div className="webcv-status-strip">
+            <span>Camera {cameraState}</span>
+            <span>Latency {lastLatency ? `${lastLatency} ms` : "N/A"}</span>
+            <span>Event {latestEvent?.event_type?.replaceAll("_", " ") || "WAITING"}</span>
+          </div>
+          <div className="webcv-log-strip">
+            {(logs || []).slice(0, 5).map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}
+          </div>
         </div>
         <div className="webcv-side">
-          <article><b>SESSION</b><strong>{session?.status || "STARTING"}</strong><span>{session?.session_id || "Creating session"} / {sourceMode.replace("_", " ")}</span></article>
-          <article><b>DETECTION</b><strong>{result?.decision?.status || "READY"}</strong><span>{result?.analysis?.model || result?.analysis?.provider || "Waiting for evidence"}</span></article>
-          <article><b>DECISION</b><strong>{result?.decision?.dispatch || result?.decision?.recommendation || "No decision yet"}</strong><span>{result?.impact?.event_type || "Runs through backend policy"}</span></article>
-          <article><b>IMPACT</b><strong>{result?.event?.observation?.event_type?.replaceAll("_", " ") || "SSE ready"}</strong><span>{result?.event?.event_id || "No event emitted yet"}</span></article>
+          {sideCards.map((card) => <article key={card.title} className={card.tone || ""}><b>{card.title}</b><strong>{card.value}</strong><span>{card.detail}</span></article>)}
         </div>
       </div>
     </Panel>
@@ -1555,7 +1583,7 @@ function WebCvCameraPanel({ title, module, session, sourceMode, setSourceMode, o
 function WebCvResultTimeline({ mode }) {
   const live = useLiveCvState(mode);
   return (
-    <Panel title="Module Event Stream" icon={Activity} compact>
+    <Panel title="Module Event History" icon={Activity} compact>
       <div className="cv-event-strip">
         {(live.events || []).slice(0, 6).map((event) => (
           <article key={event.event_id}>
@@ -1563,9 +1591,28 @@ function WebCvResultTimeline({ mode }) {
             <span>{event.shipment_id || event.vehicle_id || event.hub_id || "network"} - {formatTimeWib(event.observed_at)} - {formatPercent(event.confidence)}</span>
           </article>
         ))}
-        {!live.events?.length && <EmptyState>No module event yet. Run a web assessment or replay.</EmptyState>}
+        {!live.events?.length && <EmptyState>No module event yet. Run a live browser assessment.</EmptyState>}
       </div>
     </Panel>
+  );
+}
+
+function WebCvOutputHistory({ outputs = [], logs = [] }) {
+  return (
+    <div className="two-col">
+      <Panel title="Latest Outputs" icon={ClipboardList} compact>
+        <div className="webcv-history-list">
+          {outputs.slice(0, 5).map((item, index) => <article key={`${item.title}-${index}`}><b>{item.title}</b><span>{item.detail}</span></article>)}
+          {!outputs.length && <EmptyState>No output yet.</EmptyState>}
+        </div>
+      </Panel>
+      <Panel title="Technical Logs" icon={Database} compact>
+        <div className="webcv-history-list">
+          {logs.slice(0, 8).map((line, index) => <article key={`${line}-${index}`}><span>{line}</span></article>)}
+          {!logs.length && <EmptyState>Logs will appear after camera or inference actions.</EmptyState>}
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -1603,28 +1650,42 @@ function PackageQuality() {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [logs, setLogs] = useState([]);
+  const [outputs, setOutputs] = useState([]);
+  const pushLog = (line) => setLogs((items) => [`${formatTimeWib(new Date().toISOString(), true)} - ${line}`, ...items].slice(0, 20));
   async function run(file) {
     if (!web.session?.session_id) return;
     setBusy(true);
     setError("");
-    try { setResult(await api.webCvPackageQuality(web.session.session_id, file)); }
-    catch (err) { setError(err.message); }
-    finally { setBusy(false); }
-  }
-  async function replay() {
-    setBusy(true);
-    try { await api.cvReplay("PACKAGE_DAMAGE"); }
+    pushLog("snapshot captured; package quality request sent");
+    try {
+      const data = await api.webCvPackageQuality(web.session.session_id, file);
+      setResult(data);
+      setOutputs((items) => [{ title: data.decision.status, detail: `${data.analysis.damage.label} / ${formatPercent(data.analysis.damage.confidence)} / ${data.event?.event_id || "no event"}` }, ...items].slice(0, 8));
+      pushLog("backend response received; package quality event emitted");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
   const damage = result?.analysis?.damage || {};
   const selected = result?.observation?.selected_package;
+  const sideCards = [
+    { title: "DETECTION", value: selected ? "PACKAGE DETECTED" : "READY", detail: selected ? `${selected.raw_class || selected.normalized_class} / ${formatPercent(selected.confidence)} confidence` : "Place one package in view" },
+    { title: "ANALYSIS", value: damage.label || "WAITING", detail: damage.confidence ? `${formatPercent(damage.confidence)} damage confidence / ${result?.analysis?.package_detection_ms || 0} ms detect` : "Damage classifier runs after detection", tone: damage.label === "DAMAGED" ? "danger" : "" },
+    { title: "BACKEND DECISION", value: result?.decision?.status || "NO DECISION", detail: result?.decision?.recommendation || "Press Analyze Package" },
+    { title: "OPERATIONAL IMPACT", value: result?.impact?.digital_twin || "PENDING", detail: result?.event?.observation?.event_type?.replaceAll("_", " ") || "No event emitted yet" },
+  ];
   return (
     <>
-      <Header title="Package Quality" description="Open the browser camera or upload a package image. Render runs package detection and damage classification, then writes the operational event." action={<span className="badge">{web.health?.status || "WEB CV"} / {web.health?.package_model || "model"}</span>} />
-      <WebCvCameraPanel title="Package Quality Web Assessor" module="PACKAGE_QUALITY" session={web.session} sourceMode={web.sourceMode} setSourceMode={web.setSourceMode} onRun={run} onReset={async () => { await web.reset(); setResult(null); }} busy={busy} result={result} instruction="Place one package clearly in view and press Analyze Snapshot." primaryAction="Analyze Package" secondaryAction="Run Replay" onSecondary={replay} />
+      <Header title="Package Quality" description="Live browser camera snapshot for package detection and damage classification. Heavy inference only runs when Analyze Package is pressed." action={<span className="badge">{web.health?.status || "WEB CV"} / package {web.health?.package_model || "model"}</span>} />
+      <WebCvCameraPanel title="B.A.L.O.N Package Quality Sensor" module="PACKAGE_QUALITY" session={web.session} health={web.health} onRun={run} onReset={async () => { await web.reset(); setResult(null); setError(""); pushLog("session reset"); }} busy={busy} result={result} instruction="Place one package clearly in view and press Analyze Package." primaryAction="Analyze Package" sideCards={sideCards} logs={logs} overlay="packages" />
       {error && <div className="webcv-error">{error}</div>}
-      <LiveCVWorkspace mode="PACKAGE_QUALITY" scenario="PACKAGE_DAMAGE" title="Local Worker Fallback" />
       <WebCvResultTimeline mode="PACKAGE_QUALITY" />
+      <WebCvOutputHistory outputs={outputs} logs={logs} />
       {result && (
         <>
         <VisionStageFlow active={1} />
@@ -1663,15 +1724,65 @@ function DispatchValidation() {
   const [contextId, setContextId] = useState("CTX-JKT-BAY-02");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [qrOverlay, setQrOverlay] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [outputs, setOutputs] = useState([]);
+  const pushLog = (line) => setLogs((items) => [`${formatTimeWib(new Date().toISOString(), true)} - ${line}`, ...items].slice(0, 20));
+  async function browserDecodeQr(file) {
+    if (!("BarcodeDetector" in window)) return null;
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    const bitmap = await createImageBitmap(file);
+    const codes = await detector.detect(bitmap);
+    const code = codes?.[0];
+    if (!code) return null;
+    const raw = code.rawValue || "";
+    const box = code.boundingBox;
+    const bbox = box ? { x1: box.x / bitmap.width, y1: box.y / bitmap.height, x2: (box.x + box.width) / bitmap.width, y2: (box.y + box.height) / bitmap.height } : null;
+    let payload;
+    try { payload = JSON.parse(raw); } catch { payload = { shipment_id: raw }; }
+    return { raw, payload, bbox };
+  }
   async function scan(file) {
     if (!web.session?.session_id) return;
     setBusy(true);
     setError("");
-    try { setResult(await api.webCvDispatchScan(web.session.session_id, file, contextId)); }
-    catch (err) { setError(err.message); }
+    pushLog("snapshot captured; QR scan started");
+    try {
+      const decoded = await browserDecodeQr(file);
+      let data;
+      if (decoded?.payload?.shipment_id) {
+        setQrOverlay({ bbox: decoded.bbox, label: decoded.payload.shipment_id });
+        pushLog("browser QR decoded; sending payload to backend validation");
+        data = await api.webCvDispatchValidateDecoded(web.session.session_id, decoded.payload, contextId, { raw: decoded.raw, bbox: decoded.bbox });
+      } else {
+        pushLog("browser QR unavailable/unreadable; using backend OpenCV fallback");
+        data = await api.webCvDispatchScan(web.session.session_id, file, contextId);
+        const points = data.observation?.qr?.points?.[0];
+        if (points?.length) {
+          const xs = points.map((p) => p[0]);
+          const ys = points.map((p) => p[1]);
+          setQrOverlay({ bbox: { x1: Math.min(...xs) / (data.evidence?.image_width || 1), y1: Math.min(...ys) / (data.evidence?.image_height || 1), x2: Math.max(...xs) / (data.evidence?.image_width || 1), y2: Math.max(...ys) / (data.evidence?.image_height || 1) }, label: data.observation?.shipment_id });
+        }
+      }
+      setResult(data);
+      setOutputs((items) => [{ title: data.decision.status, detail: `${data.observation.shipment_id} / ${data.decision.dispatch} / ${data.event?.event_id || "no event"}` }, ...items].slice(0, 8));
+      pushLog("backend validation received; dispatch event emitted");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
-  async function replay() { setBusy(true); try { await api.cvReplay("WRONG_LOADING"); } finally { setBusy(false); } }
+  const planned = result?.analysis?.planned_assignment || {};
+  const active = result?.analysis?.active_context || {};
+  const sideCards = [
+    { title: "DETECTION", value: result?.observation?.shipment_id || "QR READY", detail: result?.observation?.package_id || "Show SHP-LOAD-001 to the camera" },
+    { title: "ANALYSIS", value: `${planned.planned_vehicle_id || planned.planned_vehicle || "planned"} -> ${active.current_vehicle_id || "active"}`, detail: `${planned.planned_route_id || "planned route"} / ${active.current_route_id || "active route"}` },
+    { title: "BACKEND DECISION", value: result?.decision?.status || "NO DECISION", detail: result?.decision?.dispatch || "Select context and scan QR", tone: result?.decision?.dispatch === "BLOCKED" ? "danger" : "" },
+    { title: "OPERATIONAL IMPACT", value: result?.impact?.vehicle_assignment || "PENDING", detail: result?.event?.observation?.event_type?.replaceAll("_", " ") || "No event emitted yet" },
+  ];
   return (
     <>
       <Header title="Dispatch Validation" description="Scan SHP-LOAD-001 from the browser. The backend compares the decoded QR identity against the active loading context." action={<span className="badge">{contextId === "CTX-JKT-BAY-01" ? "Correct VAN-021" : "Wrong VAN-044"}</span>} />
@@ -1683,10 +1794,10 @@ function DispatchValidation() {
           </select>
         </div>
       </Panel>
-      <WebCvCameraPanel title="Dispatch Validation Web Assessor" module="DISPATCH_VALIDATION" session={web.session} sourceMode={web.sourceMode} setSourceMode={web.setSourceMode} onRun={scan} onReset={async () => { await web.reset(); setResult(null); }} busy={busy} result={result} instruction="Show the SHP-LOAD-001 QR code to the camera, then press Scan QR." primaryAction="Scan QR" secondaryAction="Run Replay" onSecondary={replay} />
+      <WebCvCameraPanel title="B.A.L.O.N Dispatch QR Sensor" module="DISPATCH_VALIDATION" session={web.session} health={web.health} onRun={scan} onReset={async () => { await web.reset(); setResult(null); setQrOverlay(null); setError(""); pushLog("session reset"); }} busy={busy} result={result} instruction="Show the SHP-LOAD-001 QR code to the camera, then press Scan QR." primaryAction="Scan QR" sideCards={sideCards} logs={logs} overlay="dispatch" qrOverlay={qrOverlay} />
       {error && <div className="webcv-error">{error}</div>}
-      <LiveCVWorkspace mode="DISPATCH_VALIDATION" scenario="WRONG_LOADING" title="Local Worker Fallback" />
       <WebCvResultTimeline mode="DISPATCH_VALIDATION" />
+      <WebCvOutputHistory outputs={outputs} logs={logs} />
       {result && (
         <>
           <VisionStageFlow active={2} />
@@ -1720,23 +1831,42 @@ function LoadingCompliance() {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [logs, setLogs] = useState([]);
+  const [outputs, setOutputs] = useState([]);
+  const pushLog = (line) => setLogs((items) => [`${formatTimeWib(new Date().toISOString(), true)} - ${line}`, ...items].slice(0, 20));
   async function run(file) {
     if (!web.session?.session_id) return;
     setBusy(true);
     setError("");
-    try { setResult(await api.webCvLoadingSnapshot(web.session.session_id, file, "VAN-021")); }
-    catch (err) { setError(err.message); }
+    pushLog("snapshot captured; loading count request sent");
+    try {
+      const data = await api.webCvLoadingSnapshot(web.session.session_id, file, "VAN-021");
+      setResult(data);
+      setOutputs((items) => [{ title: `${data.analysis.detected_package_count}/${data.analysis.configured_limit} packages`, detail: `${data.decision.status} / dispatch ${data.decision.dispatch} / ${data.event?.event_id || "no event"}` }, ...items].slice(0, 8));
+      pushLog("backend response received; loading snapshot frozen");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
-  async function replay() { setBusy(true); try { await api.cvReplay("LOADING_COMPLIANCE"); } finally { setBusy(false); } }
   const analysis = result?.analysis || {};
+  const utilization = Math.round(((analysis.detected_package_count || 0) / Math.max(analysis.configured_limit || 5, 1)) * 100);
+  const sideCards = [
+    { title: "DETECTION", value: `${analysis.detected_package_count ?? 0} IN ROI`, detail: `${analysis.raw_detection_count ?? 0} raw detections / ROI visible` },
+    { title: "ANALYSIS", value: `${utilization}% UTILIZATION`, detail: `limit ${analysis.configured_limit || 5} / excess ${analysis.excess_count || 0}` },
+    { title: "BACKEND DECISION", value: analysis.capacity_status?.replaceAll("_", " ") || "READY", detail: `dispatch ${analysis.dispatch_state || "WAITING"}`, tone: analysis.dispatch_state === "BLOCKED" ? "danger" : "" },
+    { title: "OPERATIONAL IMPACT", value: result?.impact?.vehicle_digital_twin || "PENDING", detail: analysis.recommendation || "Capture a snapshot to update dispatch" },
+  ];
   return (
     <>
       <Header title="Loading Compliance" description="Arrange packages in the loading ROI, then capture one frozen snapshot. The count does not accumulate across frames." action={<span className="badge">Snapshot limit 5 packages</span>} />
-      <WebCvCameraPanel title="Loading Compliance Web Assessor" module="LOADING_COMPLIANCE" session={web.session} sourceMode={web.sourceMode} setSourceMode={web.setSourceMode} onRun={run} onReset={async () => { await web.reset(); setResult(null); }} busy={busy} result={result} instruction="Arrange packages inside the vehicle ROI and press Capture Snapshot." primaryAction="Capture Snapshot" secondaryAction="Run Replay" onSecondary={replay} />
+      <WebCvCameraPanel title="B.A.L.O.N Loading Compliance Sensor" module="LOADING_COMPLIANCE" session={web.session} health={web.health} onRun={run} onReset={async () => { await web.reset(); setResult(null); setError(""); pushLog("session reset"); }} busy={busy} result={result} instruction="Arrange packages inside the visible loading ROI and press Capture Snapshot." primaryAction="Capture Snapshot" sideCards={sideCards} logs={logs} overlay="loading" />
       {error && <div className="webcv-error">{error}</div>}
-      <LiveCVWorkspace mode="LOADING_COMPLIANCE" scenario="LOADING_COMPLIANCE" title="Local Worker Fallback" />
       <WebCvResultTimeline mode="LOADING_COMPLIANCE" />
+      <WebCvOutputHistory outputs={outputs} logs={logs} />
       {result && (
         <>
           <VisionStageFlow active={3} />
@@ -1763,38 +1893,77 @@ function HubVision() {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [logs, setLogs] = useState([]);
+  const [outputs, setOutputs] = useState([]);
+  const pushLog = (line) => setLogs((items) => [`${formatTimeWib(new Date().toISOString(), true)} - ${line}`, ...items].slice(0, 20));
   async function start(file) {
     if (!web.session?.session_id) return;
     setBusy(true);
     setError("");
-    try { setResult(await api.webCvHubStart(web.session.session_id, file)); }
-    catch (err) { setError(err.message); }
+    pushLog("snapshot captured; hub journey start requested");
+    try {
+      const data = await api.webCvHubStart(web.session.session_id, file);
+      setResult(data);
+      setOutputs((items) => [{ title: `Hub ${data.analysis.status}`, detail: `${data.analysis.current_stage} / risk ${data.analysis.risk_level} / ${data.event?.event_id || "no event"}` }, ...items].slice(0, 8));
+      pushLog("hub start response received");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
   async function observe(file) {
     if (!web.session?.session_id) return;
     setBusy(true);
     setError("");
-    try { setResult(await api.webCvHubFrame(web.session.session_id, file)); }
-    catch (err) { setError(err.message); }
+    pushLog("snapshot captured; hub observation sent");
+    try {
+      const data = await api.webCvHubFrame(web.session.session_id, file);
+      setResult(data);
+      setOutputs((items) => [{ title: `${data.analysis.current_stage}`, detail: `${data.analysis.zone_1_seconds}s / ${data.analysis.zone_2_seconds}s / ${data.analysis.zone_3_seconds}s` }, ...items].slice(0, 8));
+      pushLog("hub observation response received");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
   async function stop() {
     if (!web.session?.session_id) return;
     setBusy(true);
-    try { setResult(await api.webCvHubStop(web.session.session_id)); }
-    catch (err) { setError(err.message); }
+    pushLog("stop journey requested");
+    try {
+      const data = await api.webCvHubStop(web.session.session_id);
+      setResult(data);
+      setOutputs((items) => [{ title: "Journey completed", detail: `${data.analysis.actual_total_seconds || 0}s total / ${data.analysis.estimated_delay_hours || 0}h delay` }, ...items].slice(0, 8));
+      pushLog("journey completed event emitted");
+    }
+    catch (err) {
+      const message = formatErrorMessage(err.message);
+      setError(message);
+      pushLog(`error: ${message}`);
+    }
     finally { setBusy(false); }
   }
   const analysis = result?.analysis || {};
   const zones = analysis.zones || [];
+  const sideCards = [
+    { title: "DETECTION", value: analysis.target_status || "READY", detail: `${analysis.current_stage || "Place package in Receiving"} / ${analysis.provider || "YOLO_SINGLE_PACKAGE"}` },
+    { title: "ANALYSIS", value: `${analysis.zone_1_seconds || 0}s / ${analysis.zone_2_seconds || 0}s / ${analysis.zone_3_seconds || 0}s`, detail: `${analysis.transition_count || 0} transition(s)` },
+    { title: "BACKEND DECISION", value: analysis.status || "NO JOURNEY", detail: `risk ${analysis.risk_level || "N/A"}`, tone: riskTone(analysis.risk_level) === "red" ? "danger" : "" },
+    { title: "OPERATIONAL IMPACT", value: `${analysis.projected_real_dwell_hours || 0}h dwell`, detail: `${analysis.estimated_delay_hours || 0}h delay / score ${analysis.risk_score || 0}` },
+  ];
   return (
     <>
       <Header title="Hub Vision" description="Start the journey with one package in Receiving. Send observations as it moves through Processing and Dispatch, then stop to freeze the final projection." action={<Button onClick={stop} busy={busy}>Stop Journey</Button>} />
-      <WebCvCameraPanel title="Hub Journey Web Assessor" module="HUB_VISION" session={web.session} sourceMode={web.sourceMode} setSourceMode={web.setSourceMode} onRun={analysis.status === "RUNNING" ? observe : start} onReset={async () => { await api.webCvHubReset(web.session?.session_id); setResult(null); }} busy={busy} result={result} instruction="Place one package in the left Receiving zone and press Start Journey." primaryAction={analysis.status === "RUNNING" ? "Send Observation" : "Start Journey"} secondaryAction="Stop Journey" onSecondary={stop} />
+      <WebCvCameraPanel title="B.A.L.O.N Hub Journey Sensor" module="HUB_VISION" session={web.session} health={web.health} onRun={analysis.status === "RUNNING" ? observe : start} onStop={stop} onReset={async () => { await api.webCvHubReset(web.session?.session_id); setResult(null); setError(""); pushLog("session reset"); }} busy={busy} result={result} instruction="Place one package in the left Receiving zone and press Start Journey." primaryAction={analysis.status === "RUNNING" ? "Send Observation" : "Start Journey"} stopAction="Stop Journey" sideCards={sideCards} logs={logs} overlay="hub" />
       {error && <div className="webcv-error">{error}</div>}
-      <LiveCVWorkspace mode="HUB_VISION" scenario="HUB_CONGESTION" title="Local Worker Fallback" />
       <WebCvResultTimeline mode="HUB_VISION" />
+      <WebCvOutputHistory outputs={outputs} logs={logs} />
       {result && (
         <>
           <VisionStageFlow active={5} />

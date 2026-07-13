@@ -37,6 +37,6 @@ Open the deployed Vercel app and go to Visual Intelligence.
 6. Press Stop Journey.
 7. Confirm stage times, projected dwell, estimated delay, risk score, and final event.
 
-## Fallbacks
+## Camera Requirement
 
-If browser camera access is denied, use Upload Image. Replay remains available and is labeled as replay, not live inference.
+The Web Assessor pages are live-camera focused. If browser camera access is denied, enable camera permission in the browser or test locally with the desktop CV worker.
